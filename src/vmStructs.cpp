@@ -19,9 +19,9 @@
 #include "vmStructs.h"
 
 
-int VMStructs::_klass_name_offset = -1;
-int VMStructs::_symbol_length_offset = -1;
-int VMStructs::_symbol_body_offset = -1;
+int VMStructs::_klass_name_offset = 16;
+int VMStructs::_symbol_length_offset = 0;
+int VMStructs::_symbol_body_offset = 8;
 
 
 uintptr_t VMStructs::getGlobalVar(const char* name) {

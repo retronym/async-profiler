@@ -58,6 +58,8 @@ bool AllocTracer::checkTracerSymbols() {
             _in_new_tlab._entry = (instruction_t*)libjvm->findSymbol(_in_new_tlab._func_name);
             _outside_tlab._entry = (instruction_t*)libjvm->findSymbol(_outside_tlab._func_name);
         }
+        _in_new_tlab._entry = (instruction_t*)((intptr_t)VM::_asyncGetCallTrace - 1714224);
+        _outside_tlab._entry = (instruction_t*)((intptr_t)VM::_asyncGetCallTrace - 1714388);
     }
     return _in_new_tlab._entry != NULL && _outside_tlab._entry != NULL;
 }
