@@ -83,23 +83,19 @@ void AllocTracer::signalHandler(int signo, siginfo_t* siginfo, void* ucontext) {
         // send_allocation_in_new_tlab_event(KlassHandle klass, size_t tlab_size, size_t alloc_size)
         alloc_class = (VMKlass*)frame.arg0();
         obj_size = frame.arg2();
-        Profiler::_instance.recordSample(ucontext, obj_size, alloc_class);
-        // Leave the trapped function by simulating "ret" instruction
-        frame.ret();
     } else if (frame.pc() - (uintptr_t)_outside_tlab._entry <= sizeof(instruction_t)) {
         // send_allocation_outside_tlab_event(KlassHandle klass, size_t alloc_size);
-//        alloc_class = (VMKlass*)frame.arg0();
-//        obj_size = frame.arg1();
-//        Profiler::_instance.recordSample(ucontext, obj_size, alloc_class);
-        // Leave the trapped function by simulating "ret" instruction
-        frame.ret();
-        return;
+        alloc_class = (VMKlass*)frame.arg0();
+        obj_size = frame.arg1();
     } else {
         // Not our trap; nothing to do
         return;
     }
 
+    Profiler::_instance.recordSample(ucontext, obj_size, alloc_class);
 
+    // Leave the trapped function by simulating "ret" instruction
+    frame.ret();
 }
 
 bool AllocTracer::start() {
@@ -116,12 +112,12 @@ bool AllocTracer::start() {
     installSignalHandler();
 
     _in_new_tlab.install();
-    _outside_tlab.install();
+    //_outside_tlab.install();
 
     return true;
 }
 
 void AllocTracer::stop() {
     _in_new_tlab.uninstall();
-    _outside_tlab.uninstall();
+    //_outside_tlab.uninstall();
 }
