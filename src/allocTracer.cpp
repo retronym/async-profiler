@@ -92,7 +92,7 @@ void AllocTracer::signalHandler(int signo, siginfo_t* siginfo, void* ucontext) {
         return;
     }
 
-    Profiler::_instance.recordSample(ucontext, obj_size, alloc_class);
+    Profiler::_instance.recordSample(ucontext, 1, alloc_class);
 
     // Leave the trapped function by simulating "ret" instruction
     frame.ret();
