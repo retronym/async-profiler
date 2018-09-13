@@ -27,7 +27,6 @@
 #include <unistd.h>
 #include "flightRecorder.h"
 #include "profiler.h"
-#include "vmEntry.h"
 #include "vmStructs.h"
 
 
@@ -360,10 +359,9 @@ class Recording {
     }
 
     u64 nanotime() {
-        // There is no clock_gettime() on OS X El Capitan and some exotic Linux distributions
-        jlong nanos;
-        VM::jvmti()->GetTime(&nanos);
-        return nanos;
+        struct timespec tp;
+        clock_gettime(CLOCK_MONOTONIC, &tp);
+        return (u64)tp.tv_sec * 1000000000 + tp.tv_nsec;
     }
 
     int lookup(std::map<std::string, int>& map, std::string key) {
