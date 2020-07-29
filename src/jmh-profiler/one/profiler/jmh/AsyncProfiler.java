@@ -28,6 +28,8 @@ import org.openjdk.jmh.runner.IterationType;
 import org.openjdk.jmh.profile.*;
 
 import java.io.*;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.util.*;
 
 
@@ -130,7 +132,7 @@ public class AsyncProfiler implements ExternalProfiler, InternalProfiler {
     this.interval = interval.value(options);
     if (!options.has(dir)) {
       String prefix = "jmh-async-profiler-";
-      outDir = createTempDir(prefix);
+      outDir = createTempDir(prefix, null);
     } else {
       outDir = new File(options.valueOf(dir));
     }
@@ -190,14 +192,33 @@ public class AsyncProfiler implements ExternalProfiler, InternalProfiler {
     if (iterationParams.getType() == IterationType.MEASUREMENT) {
       measurementIterationCount += 1;
       if (measurementIterationCount == iterationParams.getCount()) {
-        return Collections.singletonList(stopAndDump());
+        StringBuilder dirName = new StringBuilder();
+        dirName.append(sanitizeFileName(benchmarkParams.getBenchmark()));
+        dirName.append("?");
+        for (String key : benchmarkParams.getParamsKeys()) {
+          dirName.append(sanitizeFileName(key)).append("=").append(sanitizeFileName(benchmarkParams.getParam(key))).append("&");
+        }
+        if (benchmarkParams.getParamsKeys().size() > 0) {
+          dirName.deleteCharAt(dirName.length() - 1);
+        }
+        File specificOutDir = new File(this.outDir, dirName.toString());
+        specificOutDir.mkdirs();
+        return Collections.singletonList(stopAndDump(specificOutDir));
       }
     }
 
     return Collections.emptyList();
   }
 
-  private TextResult stopAndDump() {
+  private static String sanitizeFileName(String s) {
+    try {
+      return URLEncoder.encode(s, StandardCharsets.UTF_8.name());
+    } catch (UnsupportedEncodingException e) {
+      throw new RuntimeException(e);
+    }
+  }
+
+  private TextResult stopAndDump(File specificOutDir) {
     instance.stop();
 
     StringWriter output = new StringWriter();
@@ -205,28 +226,27 @@ public class AsyncProfiler implements ExternalProfiler, InternalProfiler {
     for (OutputType outputType : this.output) {
       switch (outputType) {
         case text:
-          String textOutput = dump("summary-%s.txt", "summary,flat=" + flat + ",traces=" + traces);
+          String textOutput = dump(specificOutDir, "summary-%s.txt", "summary,flat=" + flat + ",traces=" + traces);
           pw.println(textOutput);
           break;
         case collapsed:
-          dump("collapsed-%s.csv", "collapsed");
+          dump(specificOutDir, "collapsed-%s.csv", "collapsed");
           break;
         case flamegraph:
           if (direction == Direction.both || direction == Direction.forward) {
-            dump("flame-%s-forward.svg", "svg");
+            dump(specificOutDir, "flame-%s-forward.svg", "svg");
           }
           if (direction == Direction.both || direction == Direction.reverse) {
-            dump("flame-%s-reverse.svg", "svg,reverse");
+            dump(specificOutDir, "flame-%s-reverse.svg", "svg,reverse");
           }
           break;
         case tree:
-          dump("tree-%s.html", "tree");
+          dump(specificOutDir, "tree-%s.html", "tree");
           break;
         case jfr:
-          dump("%s.jfr", "jfr");
+          dump(specificOutDir, "%s.jfr", "jfr");
           break;
       }
-
     }
     for (File file : generated) {
       pw.println(file.getAbsolutePath());
@@ -237,14 +257,9 @@ public class AsyncProfiler implements ExternalProfiler, InternalProfiler {
     return new TextResult(output.toString(), "async");
   }
 
-  private File resultFile(String name) {
-    File file = new File(outDir, String.format(name, event));
-    generated.add(file);
-    return file;
-  }
-
-  private String dump(String fileNameFormatString, String content) {
-    File output = resultFile(fileNameFormatString);
+  private String dump(File specificOutDir, String fileNameFormatString, String content) {
+    File output = new File(specificOutDir, String.format(fileNameFormatString, event));
+    generated.add(output);
     try {
       String result = instance.execute(content + "," + profilerConfig);
       write(output, result);
@@ -267,9 +282,9 @@ public class AsyncProfiler implements ExternalProfiler, InternalProfiler {
     }
   }
 
-  private static File createTempDir(String prefix) {
+  private static File createTempDir(String prefix, File dir) {
     try {
-      File tempFile = File.createTempFile(prefix, "");
+      File tempFile = File.createTempFile(prefix, "", dir);
       tempFile.delete();
       tempFile.mkdir();
       return tempFile;
