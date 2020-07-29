@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project>
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>io.github.jvm-profiling-tools.async-profiler</groupId>
+    <artifactId>async-profiler</artifactId>
+    <version>1.18-SNAPSHOT</version>
+  </parent>
+  <artifactId>api</artifactId>
+  <version>1.18-SNAPSHOT</version>
+</project>
