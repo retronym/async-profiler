@@ -25,6 +25,8 @@ import java.io.IOException;
  * libasyncProfiler.so.
  */
 public class AsyncProfiler implements AsyncProfilerMXBean {
+    public static long DEFAULT_INTERVAL = 10000000;  // 10 ms
+
     private static AsyncProfiler instance;
 
     private AsyncProfiler() {

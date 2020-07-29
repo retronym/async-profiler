@@ -5,6 +5,7 @@ LIB_PROFILER=libasyncProfiler.so
 JATTACH=jattach
 API_JAR=async-profiler.jar
 CONVERTER_JAR=converter.jar
+JMH_PROFILER_JAR=jmh-profiler.jar
 CFLAGS=-O2
 CXXFLAGS=-O2
 INCLUDES=-I$(JAVA_HOME)/include
@@ -15,6 +16,17 @@ SOURCES := $(wildcard src/*.cpp)
 HEADERS := $(wildcard src/*.h)
 API_SOURCES := $(wildcard src/api/one/profiler/*.java)
 CONVERTER_SOURCES := $(shell find src/converter -name '*.java')
+JMH_PROFILER_SOURCES := $(shell find src/jmh-profiler -name '*.java')
+
+MAVEN_CENTRAL=https://repo1.maven.org/maven2
+JMH_VERSION=1.23
+JMH_CORE_PATH=org/openjdk/jmh/jmh-core/$(JMH_VERSION)
+JMH_CORE_SHA1=eb242d3261f3795c8bf09818d17c3241191284a0
+JMH_CORE_JAR=jmh-core-$(JMH_VERSION).jar
+JOPT_SIMPLE_VERSION=4.6
+JOPT_SIMPLE_PATH=net/sf/jopt-simple/jopt-simple/$(JOPT_SIMPLE_VERSION)
+JOPT_SIMPLE_SHA1=306816fb57cf94f108a43c95731b08934dcae15c
+JOPT_SIMPLE_JAR=jopt-simple-$(JOPT_SIMPLE_VERSION).jar
 
 ifeq ($(JAVA_HOME),)
   export JAVA_HOME:=$(shell java -cp . JavaHome)
@@ -34,7 +46,7 @@ endif
 
 .PHONY: all release test clean
 
-all: build build/$(LIB_PROFILER) build/$(JATTACH) build/$(API_JAR) build/$(CONVERTER_JAR)
+all: build build/$(LIB_PROFILER) build/$(JATTACH) build/$(API_JAR) build/$(CONVERTER_JAR) build/$(JMH_PROFILER_JAR)
 
 release: build async-profiler-$(RELEASE_TAG).tar.gz
 
@@ -44,6 +56,18 @@ async-profiler-$(RELEASE_TAG).tar.gz: build/$(LIB_PROFILER) build/$(JATTACH) \
 	chmod 755 build profiler.sh
 	chmod 644 LICENSE NOTICE *.md
 	tar cvzf $@ $^
+
+build/$(JOPT_SIMPLE_JAR):
+	curl --silent --fail -L $(MAVEN_CENTRAL)/$(JOPT_SIMPLE_PATH)/$(JOPT_SIMPLE_JAR) > build/download.jar
+	printf "$(JOPT_SIMPLE_SHA1)  build/download.jar\n" > build/expected.sha
+	shasum -c build/expected.sha
+	mv build/download.jar build/$(JOPT_SIMPLE_JAR)
+
+build/$(JMH_CORE_JAR):
+	curl --silent --fail -L $(MAVEN_CENTRAL)/$(JMH_CORE_PATH)/$(JMH_CORE_JAR) > build/download.jar
+	printf "$(JMH_CORE_SHA1)  build/download.jar\n" > build/expected.sha
+	shasum -c build/expected.sha
+	mv build/download.jar build/$(JMH_CORE_JAR)
 
 build:
 	mkdir -p build
@@ -65,6 +89,12 @@ build/$(CONVERTER_JAR): $(CONVERTER_SOURCES) src/converter/MANIFEST.MF
 	$(JAVAC) -source 7 -target 7 -d build/converter $(CONVERTER_SOURCES)
 	$(JAR) cvfm $@ src/converter/MANIFEST.MF -C build/converter .
 	$(RM) -r build/converter
+
+build/$(JMH_PROFILER_JAR): $(JMH_PROFILER_SOURCES) build/$(API_JAR) build/$(JOPT_SIMPLE_JAR) build/$(JMH_CORE_JAR)
+	mkdir -p build/jmh-profiler
+	$(JAVAC) -source 7 -target 7 -d build/jmh-profiler -cp build/$(API_JAR):build/$(JOPT_SIMPLE_JAR):build/$(JMH_CORE_JAR) $(JMH_PROFILER_SOURCES)
+	$(JAR) cvf $@ -C build/jmh-profiler .
+	$(RM) -r build/jmh-profiler
 
 test: all
 	test/smoke-test.sh
