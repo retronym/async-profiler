@@ -8,6 +8,7 @@
 	body {margin: 0; padding: 10px 10px 22px 10px; background-color: var(--bg); color: var(--fg)}
 	h1 {margin: 5px 0 0 0; font-size: 18px; font-weight: normal; text-align: center}
 	header {margin: -22px 0 6px 0}
+	header.left {display: flex; align-items: center}
 	button {border: none; background: none; width: 24px; height: 24px; cursor: pointer; margin: 0; padding: 2px 0 0 0; text-align: center}
 	button:hover {background-color: var(--hl-bg); outline: 1px solid var(--hl-border); border-radius: 4px}
 	dl {margin: 0 4px 8px 4px}
@@ -24,16 +25,34 @@
 	#hl {position: absolute; display: none; overflow: hidden; white-space: nowrap; pointer-events: none; background-color: var(--hl-bg); outline: 1px solid var(--hl-border); height: 15px}
 	#hl span {padding: 0 3px 0 3px}
 	#status {left: 0}
-	#match {right: 0}
-	#reset {cursor: pointer}
-	#keepMatched {width: auto; height: 18px; padding: 0 5px; font-size: 11px; vertical-align: middle}
 	#toolbar {position: sticky; top: 0; z-index: 10; background: var(--bg)}
 	#toolbar::after {content: ''; display: table; clear: both}
-	#searchbar {display: none; vertical-align: middle}
-	#searchinput {height: 20px; width: 180px; font: 12px Verdana,sans-serif; border: 1px solid var(--hl-border); border-radius: 3px; background: var(--bg); color: var(--fg); padding: 0 4px; vertical-align: middle; outline: none; box-sizing: border-box}
-	#searchinput:focus {border-color: var(--link)}
 	#canvas {width: 100%; height: /*height:*/300px; display: block}
 	#selbox {position: absolute; display: none; background: rgba(100,150,255,0.15); border: 1px solid rgba(100,150,255,0.7); pointer-events: none; box-sizing: border-box}
+	/* Search icon active state (when search row is open) */
+	#search.active {background-color: var(--hl-bg); outline: 1px solid var(--hl-border); border-radius: 4px}
+	/* Search row — second toolbar line, left-aligned under search icon */
+	#searchbar {display: none; align-items: center; padding: 3px 0 4px; gap: 4px; clear: left}
+	#searchbar.open {display: flex}
+	#recentWrap {position: relative; display: flex; align-items: center}
+	#recentBtn {width: 16px; height: 22px; padding: 0; font-size: 9px; border-right: 1px solid var(--hl-border); border-radius: 0; margin-right: 2px}
+	#recentDropdown {display: none; position: absolute; top: calc(100% + 4px); left: -3px; z-index: 30; background: var(--legend-bg); border: 1px solid var(--legend-border); border-radius: 4px; min-width: 180px; max-height: 200px; overflow-y: auto; box-shadow: 0 2px 8px rgba(0,0,0,0.2)}
+	#recentDropdown button {display: block; width: 100%; height: auto; text-align: left; padding: 4px 8px; font: 12px Verdana,sans-serif; border-radius: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis}
+	#searchinput {width: 220px; height: 22px; font: 12px Verdana,sans-serif; border: 1px solid var(--hl-border); border-radius: 3px; background: var(--bg); color: var(--fg); padding: 0 5px; outline: none; box-sizing: border-box}
+	#searchinput:focus {border-color: var(--link)}
+	.search-toggle {width: auto; min-width: 24px; height: 22px; padding: 0 5px; font-size: 11px; font-family: monospace; border-radius: 3px; color: var(--fg)}
+	.search-toggle.active {background: var(--link); color: #fff; outline: none}
+	.search-toggle.active:hover {background: var(--link); outline: none}
+	#filtchips {display: none; align-items: center; gap: 3px; flex-shrink: 0}
+	#filtchips.visible {display: flex}
+	.filt-chip {font-size: 11px; padding: 1px 6px; background: var(--hl-bg); border: 1px solid var(--hl-border); border-radius: 10px; white-space: nowrap; color: var(--fg); cursor: default}
+	.filt-chip-and {font-size: 10px; opacity: 0.5; font-style: italic}
+	#matchpct {font-size: 11px; padding: 0 6px; opacity: 0.75; white-space: nowrap; border-left: 1px solid var(--hl-border)}
+	#modeseg {display: inline-flex; border: 1px solid var(--hl-border); border-radius: 3px; overflow: hidden; flex-shrink: 0}
+	.mode-btn {width: auto; height: 22px; padding: 0 8px; font-size: 11px; border-radius: 0; border-right: 1px solid var(--hl-border)}
+	.mode-btn:last-child {border-right: none}
+	.mode-btn.active {background: var(--link); color: #fff}
+	.mode-btn.active:hover {background: var(--link); outline: none}
 </style>
 <script>
 {
@@ -48,17 +67,31 @@
 <body style='font: 12px Verdana, sans-serif'>
 <div id='toolbar'>
 <h1>/*title:*/</h1>
-<header style='float: left'>
+<header class='left' style='float: left'>
+<button id='search' title='Search — click to open/close (Ctrl+F, Esc)'><svg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='-39.3 -39.3 471.1 471.1'><circle cx='147.7' cy='147.8' r='125.9' fill='#fff'/><path fill='#40b2ff' d='M370.7 348.7c0 1.4-1.6 6.3-7.2 12.3-6.2 6.7-12.5 9.8-14.7 9.8h-.1c-19.5-1.6-62-43.2-109.6-106.8 9.2-7.2 17.5-15.5 24.6-24.6 63.6 47.6 105.2 90.2 106.8 109.6z'/><path fill='#ff8d40' d='M208.7 86.9l-14.5 14.5c-17.1 17.1-46.5 5-46.5-19.3V61.6c-49 0-88.4 40.8-86.1 90.2 2 43.9 38.1 80 82 82 49.5 2.3 90.2-37.2 90.2-86.1 0-23.7-9.6-45.2-25.1-60.8z'/><path fill='#004d80' d='M276.1 221c12.3-21.5 19.5-46.5 19.5-73.2C295.6 66.3 229.2.1 147.7.1S0 66.3 0 147.9s66.3 147.7 147.7 147.7c26.6 0 51.5-7.1 73.2-19.5 39.8 53.3 91.9 113.5 126.1 116.4 12.3.5 22.9-6.7 32.8-16.7 5.2-5.6 13.8-16.9 12.8-28.8-2.9-34.1-63.1-86.2-116.4-126.1zM147.7 273.8c-69.5 0-125.9-56.5-125.9-125.9S78.3 21.9 147.7 21.9 273.6 78.4 273.6 147.8s-56.4 126-125.9 126zm215.9 87.2c-6.2 6.7-12.4 9.8-14.7 9.8h-.1c-19.5-1.6-62-43.2-109.6-106.8 9.2-7.2 17.5-15.5 24.6-24.6 63.6 47.6 105.2 90.2 106.8 109.6 0 1.4-1.6 6.3-7.2 12.4z'/></svg></button>
 <button id='inverted' title='Invert (I)'><svg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 392 392'><path d='M196,36 L316,156 L76,156 Z' fill='#004d80'/><path d='M196,356 L76,236 L316,236 Z' fill='#004d80'/><path d='M196,54 L298,156 L94,156 Z' fill='#ff8d40'/><path d='M196,338 L94,236 L298,236 Z' fill='#40b2ff'/><rect x='94' y='188' width='204' height='16' fill='#004d80'/></svg></button>
-<button id='search' title='Search (Ctrl+F)'><svg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='-39.3 -39.3 471.1 471.1'><circle cx='147.7' cy='147.8' r='125.9' fill='#fff'/><path fill='#40b2ff' d='M370.7 348.7c0 1.4-1.6 6.3-7.2 12.3-6.2 6.7-12.5 9.8-14.7 9.8h-.1c-19.5-1.6-62-43.2-109.6-106.8 9.2-7.2 17.5-15.5 24.6-24.6 63.6 47.6 105.2 90.2 106.8 109.6z'/><path fill='#ff8d40' d='M208.7 86.9l-14.5 14.5c-17.1 17.1-46.5 5-46.5-19.3V61.6c-49 0-88.4 40.8-86.1 90.2 2 43.9 38.1 80 82 82 49.5 2.3 90.2-37.2 90.2-86.1 0-23.7-9.6-45.2-25.1-60.8z'/><path fill='#004d80' d='M276.1 221c12.3-21.5 19.5-46.5 19.5-73.2C295.6 66.3 229.2.1 147.7.1S0 66.3 0 147.9s66.3 147.7 147.7 147.7c26.6 0 51.5-7.1 73.2-19.5 39.8 53.3 91.9 113.5 126.1 116.4 12.3.5 22.9-6.7 32.8-16.7 5.2-5.6 13.8-16.9 12.8-28.8-2.9-34.1-63.1-86.2-116.4-126.1zM147.7 273.8c-69.5 0-125.9-56.5-125.9-125.9S78.3 21.9 147.7 21.9 273.6 78.4 273.6 147.8s-56.4 126-125.9 126zm215.9 87.2c-6.2 6.7-12.4 9.8-14.7 9.8h-.1c-19.5-1.6-62-43.2-109.6-106.8 9.2-7.2 17.5-15.5 24.6-24.6 63.6 47.6 105.2 90.2 106.8 109.6 0 1.4-1.6 6.3-7.2 12.4z'/></svg></button>
 <button id='darkmode' title='Toggle dark mode (D)'><svg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 20 20'><path d='M10 4a6 6 0 0 1 0 12z' fill='#ff8d40'/><path d='M10 4a6 6 0 0 0 0 12z' fill='#ffffff'/><circle cx='10' cy='10' r='8' fill='none' stroke='#004d80'/></svg></button>
-<button id='info'><svg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 20 20'><circle cx='10' cy='10' r='8' stroke='#004d80' fill='none'/><path d='M10 5.5c-1.25 0-2.25 1-2.25 2.25H9a1.25 1.25 0 0 1 2.5 0c0 .65-.55 1-1 1.2-.7.35-1.25.85-1.25 1.8V11h1.5v-.25c0-.37.29-.65.68-.83.73-.34 1.32-.87 1.32-2.17 0-1.25-1.5-2.25-2.75-2.25' fill='#ff8d40' stroke='#ff8d40' stroke-width='.6' stroke-linecap='round' stroke-linejoin='round'/><circle cx='10' cy='13.5' r='1.2' fill='#ff8d40'/></svg></button>
+<button id='info' title='Frame type legend and keyboard shortcuts'><svg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 20 20'><circle cx='10' cy='10' r='8' stroke='#004d80' fill='none'/><path d='M10 5.5c-1.25 0-2.25 1-2.25 2.25H9a1.25 1.25 0 0 1 2.5 0c0 .65-.55 1-1 1.2-.7.35-1.25.85-1.25 1.8V11h1.5v-.25c0-.37.29-.65.68-.83.73-.34 1.32-.87 1.32-2.17 0-1.25-1.5-2.25-2.75-2.25' fill='#ff8d40' stroke='#ff8d40' stroke-width='.6' stroke-linecap='round' stroke-linejoin='round'/><circle cx='10' cy='13.5' r='1.2' fill='#ff8d40'/></svg></button>
 <button id='zoomin' title='Zoom in (=)'><svg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 20 20'><circle cx='8' cy='8' r='5.5' stroke='#004d80' fill='none' stroke-width='1.5'/><line x1='12.4' y1='12.4' x2='17' y2='17' stroke='#004d80' stroke-width='2' stroke-linecap='round'/><line x1='5' y1='8' x2='11' y2='8' stroke='#004d80' stroke-width='1.5' stroke-linecap='round'/><line x1='8' y1='5' x2='8' y2='11' stroke='#004d80' stroke-width='1.5' stroke-linecap='round'/></svg></button>
 <button id='zoomout' title='Zoom out (-)'><svg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 20 20'><circle cx='8' cy='8' r='5.5' stroke='#004d80' fill='none' stroke-width='1.5'/><line x1='12.4' y1='12.4' x2='17' y2='17' stroke='#004d80' stroke-width='2' stroke-linecap='round'/><line x1='5' y1='8' x2='11' y2='8' stroke='#004d80' stroke-width='1.5' stroke-linecap='round'/></svg></button>
 <button id='restoreBtn' title='Restore removed stacks' style='display:none'><svg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 20 20'><path d='M3.5 10A6.5 6.5 0 0 0 10 16.5 6.5 6.5 0 0 0 16.5 10 6.5 6.5 0 0 0 12 4' stroke='#e17d00' fill='none' stroke-width='2' stroke-linecap='round'/><polyline points='12,1 12,5 8,4' fill='none' stroke='#e17d00' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/></svg></button>
-<span id='searchbar'><input id='searchinput' type='text' placeholder='regexp…' autocomplete='off' spellcheck='false'></span>
 </header>
 <header style='float: right'>Produced by <a href='https://github.com/async-profiler/async-profiler'>async-profiler</a></header>
+<div id='searchbar'>
+  <span id='recentWrap'>
+    <button id='recentBtn' title='Recent searches'>&#x25be;</button>
+    <div id='recentDropdown'></div>
+  </span>
+  <span id='filtchips' title='Applied filters (AND — each successive filter narrows the previous result)'></span>
+  <input id='searchinput' type='text' placeholder='Search…' autocomplete='off' spellcheck='false'>
+  <button id='toggleCase' class='search-toggle' title='Case sensitive (Alt+C)'>Cc</button>
+  <button id='toggleRegex' class='search-toggle' title='Regular expression (Alt+R)'>.*</button>
+  <span id='matchpct' title='Fraction of visible samples whose call stack contains a matching frame'></span>
+  <span id='modeseg'>
+    <button id='modeHL' class='mode-btn active' title='Highlight matching frames — navigate with N / Shift+N'>Highlight</button>
+    <button id='modeFilt' class='mode-btn' title='Remove all stacks containing no matching frames — click or Enter to apply'>Filter</button>
+  </span>
+</div>
 <div id='legend' style='position: absolute; z-index: 20'>
 <dl class='frames'>
 	<dt>Frame types</dt>
@@ -100,7 +133,6 @@
 <div id='hl'><span></span></div>
 <div id='selbox'></div>
 <p id='status'></p>
-<p id='match'>Matched: <span id='matchval'></span> <button id='keepMatched' title='Remove non-matching stacks'>Keep only</button> <span id='reset' title='Clear'>&#x274c;</span></p>
 <script>
 	// Copyright The async-profiler authors
 	// SPDX-License-Identifier: Apache-2.0
@@ -115,6 +147,7 @@
 	for (let h = 0; h < levels.length; h++) {
 		levels[h] = [];
 	}
+
 
 	const canvas = document.getElementById('canvas');
 	const c = canvas.getContext('2d');
@@ -259,25 +292,15 @@
 		render(root);
 	}
 
-	function keepOnlyMatched() {
+	function keepOnlyMatched(term) {
 		if (!nav || nav.length === 0) return;
-		// nav is sorted by left and non-overlapping (built by totalMarked).
-		// Build kept ranges with prefix sums so we can remap left positions.
+		if (term) { filterHistory.push(term); updateFilterChips(); }
 		let prefix = 0;
 		const kept = nav.map(fr => {
 			const entry = {left: fr.left, right: fr.left + fr.width, prefix};
 			prefix += fr.width;
 			return entry;
 		});
-
-		// Given an original sample position, return its position in the new compressed space.
-		function newPos(origLeft) {
-			for (const r of kept) {
-				if (origLeft < r.left) return r.prefix; // in a gap before this range
-				if (origLeft < r.right) return r.prefix + (origLeft - r.left);
-			}
-			return prefix;
-		}
 
 		for (let h = 0; h < levels.length; h++) {
 			const newFrames = [];
@@ -307,31 +330,11 @@
 			levels[h] = originalLevels[h].map(fr => ({...fr}));
 		}
 		stacksRemoved = false;
+		filterHistory = [];
+		updateFilterChips();
 		document.getElementById('restoreBtn').style.display = 'none';
 		zoomFactor = 1; panSamples = 0;
 		render(levels[0][0]);
-	}
-
-	function openSearch() {
-		const bar = document.getElementById('searchbar');
-		const input = document.getElementById('searchinput');
-		bar.style.display = 'inline';
-		input.focus();
-		input.select();
-	}
-
-	function closeSearch() {
-		document.getElementById('searchbar').style.display = 'none';
-		document.getElementById('searchinput').value = '';
-		search('');
-	}
-
-	function search(r) {
-		pattern = r ? RegExp(r) : undefined;
-		const matched = render(root, nav = []);
-		navIndex = -1;
-		document.getElementById('matchval').textContent = matchval = pct(matched, root.width) + '%';
-		document.getElementById('match').style.display = r ? 'inline-block' : 'none';
 	}
 
 	function render(newRoot, nav) {
@@ -411,6 +414,106 @@
 			cpool[i] = cpool[i - 1].substring(0, cpool[i].charCodeAt(0) - 32) + cpool[i].substring(1);
 		}
 	}
+
+	// ── Search ────────────────────────────────────────────────────────────────────
+
+	let useRegex = false;
+	let caseSensitive = false;
+	let filterMode = false;
+	let filterHistory = [];
+
+	function updateFilterChips() {
+		const el = document.getElementById('filtchips');
+		el.innerHTML = '';
+		filterHistory.forEach(function(term, i) {
+			if (i > 0) {
+				const sep = document.createElement('span');
+				sep.className = 'filt-chip-and';
+				sep.textContent = 'AND';
+				el.appendChild(sep);
+			}
+			const chip = document.createElement('span');
+			chip.className = 'filt-chip';
+			chip.textContent = term;
+			chip.title = 'Applied filter: ' + term;
+			el.appendChild(chip);
+		});
+		el.classList.toggle('visible', filterHistory.length > 0);
+	}
+
+	// Recent search history (persisted in localStorage)
+	let searchHistory = [];
+	try { searchHistory = JSON.parse(localStorage.getItem('flame-search-history') || '[]'); } catch (e) {}
+
+	function addToHistory(term) {
+		if (!term) return;
+		searchHistory = [term, ...searchHistory.filter(h => h !== term)].slice(0, 10);
+		try { localStorage.setItem('flame-search-history', JSON.stringify(searchHistory)); } catch (e) {}
+	}
+
+	function showRecentDropdown() {
+		const dd = document.getElementById('recentDropdown');
+		dd.innerHTML = '';
+		if (!searchHistory.length) { dd.style.display = 'none'; return; }
+		for (const term of searchHistory) {
+			const btn = document.createElement('button');
+			btn.textContent = term;
+			btn.onclick = function(e) {
+				e.stopPropagation();
+				const inp = document.getElementById('searchinput');
+				inp.value = term;
+				inp.focus();
+				search(term);
+				dd.style.display = 'none';
+			};
+			dd.appendChild(btn);
+		}
+		dd.style.display = 'block';
+	}
+
+	function openSearch() {
+		document.getElementById('searchbar').classList.add('open');
+		document.getElementById('search').classList.add('active');
+		const inp = document.getElementById('searchinput');
+		inp.focus();
+		inp.select();
+	}
+
+	function closeSearch() {
+		document.getElementById('searchbar').classList.remove('open');
+		document.getElementById('search').classList.remove('active');
+		document.getElementById('searchinput').value = '';
+		document.getElementById('recentDropdown').style.display = 'none';
+		document.getElementById('matchpct').style.display = 'none';
+		search('');
+	}
+
+	function search(r) {
+		let pat;
+		if (r) {
+			try {
+				const flags = caseSensitive ? '' : 'i';
+				const expr = useRegex ? r : r.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+				pat = RegExp(expr, flags);
+			} catch (e) {
+				pat = undefined; // invalid regex — skip highlight
+			}
+		}
+		pattern = pat;
+		const matched = render(root, nav = []);
+		navIndex = -1;
+		const matchpct = document.getElementById('matchpct');
+		if (r) {
+			matchval = pct(matched, root.width) + '% matched';
+			matchpct.textContent = matchval;
+			matchpct.style.display = '';
+		} else {
+			matchval = '';
+			matchpct.style.display = 'none';
+		}
+	}
+
+	// ── Event wiring ──────────────────────────────────────────────────────────────
 
 	canvas.onmousemove = function() {
 		if (dragStart || selStart) return;
@@ -507,7 +610,6 @@
 	let dragStart = null;
 	let selStart = null;
 
-	// Show crosshair cursor when Shift is held
 	document.addEventListener('keydown', function(e) {
 		if (e.key === 'Shift' && !dragStart) canvas.style.cursor = 'crosshair';
 	});
@@ -518,7 +620,6 @@
 	canvas.addEventListener('mousedown', function(e) {
 		if (e.altKey || e.ctrlKey || e.metaKey) return;
 		if (e.shiftKey) {
-			// Start selection box
 			selStart = {x: e.offsetX};
 			const rect = canvas.getBoundingClientRect();
 			selbox.style.top = (rect.top + window.scrollY) + 'px';
@@ -528,7 +629,6 @@
 			selbox.style.display = 'block';
 			canvas.onclick = null;
 		} else if (zoomFactor > 1) {
-			// Start pan drag
 			dragStart = {x: e.offsetX, pan: panSamples};
 			canvas.style.cursor = 'grab';
 			canvas.onclick = null;
@@ -559,11 +659,9 @@
 			selStart = null;
 			canvas.style.cursor = e.shiftKey ? 'crosshair' : '';
 			if (x1 - x0 > 4) {
-				// Convert pixel range to sample range and zoom in
 				const sampleL = x0Rendered + x0 / px;
 				const sampleR = x0Rendered + x1 / px;
-				const selWidthSamples = sampleR - sampleL;
-				zoomFactor = root.width / selWidthSamples;
+				zoomFactor = root.width / (sampleR - sampleL);
 				panSamples = sampleL - root.left;
 				clampPan();
 				render(root);
@@ -574,28 +672,82 @@
 		}
 	});
 
+	// Close recent dropdown on any outside click
+	document.addEventListener('click', function() {
+		document.getElementById('recentDropdown').style.display = 'none';
+	});
+
 	document.getElementById('inverted').onclick = function() {
 		inverted = !inverted;
 		render();
 	}
 
-	document.getElementById('search').onclick = openSearch;
+	document.getElementById('search').onclick = function() {
+		if (document.getElementById('searchbar').classList.contains('open')) {
+			closeSearch();
+		} else {
+			openSearch();
+		}
+	};
+
+	document.getElementById('recentBtn').onclick = function(e) {
+		e.stopPropagation();
+		showRecentDropdown();
+	};
 
 	document.getElementById('searchinput').oninput = function() {
 		search(this.value);
-	}
+	};
 
 	document.getElementById('searchinput').onkeydown = function(e) {
-		if (e.key === 'Escape') closeSearch();
-		else if (e.key === 'Enter') e.preventDefault();
+		if (e.key === 'Escape') {
+			closeSearch();
+		} else if (e.key === 'Enter') {
+			if (filterMode && nav.length > 0) {
+				addToHistory(this.value);
+				keepOnlyMatched(this.value);
+				// Stay in search — user may want to refine and filter again
+			} else if (this.value) {
+				addToHistory(this.value);
+			}
+			e.preventDefault();
+		}
 		e.stopPropagation();
-	}
+	};
 
-	document.getElementById('reset').onclick = closeSearch;
+	document.getElementById('toggleCase').onclick = function() {
+		caseSensitive = !caseSensitive;
+		this.classList.toggle('active', caseSensitive);
+		search(document.getElementById('searchinput').value);
+	};
 
-	document.getElementById('keepMatched').onclick = function() {
-		keepOnlyMatched();
-	}
+	document.getElementById('toggleRegex').onclick = function() {
+		useRegex = !useRegex;
+		this.classList.toggle('active', useRegex);
+		document.getElementById('searchinput').placeholder = useRegex ? 'Regex…' : 'Search…';
+		search(document.getElementById('searchinput').value);
+	};
+
+	document.getElementById('modeHL').onclick = function() {
+		filterMode = false;
+		restoreStacks();
+		this.classList.add('active');
+		document.getElementById('modeFilt').classList.remove('active');
+	};
+
+	document.getElementById('modeFilt').onclick = function() {
+		filterMode = true;
+		this.classList.add('active');
+		document.getElementById('modeHL').classList.remove('active');
+		// Apply immediately if there are current matches
+		const term = document.getElementById('searchinput').value;
+		if (nav && nav.length > 0) {
+			addToHistory(term);
+			keepOnlyMatched(term);
+		}
+	};
+
+	document.getElementById('restoreBtn').onclick = restoreStacks;
 
 	document.getElementById('zoomin').onclick = function() {
 		zoomAt(1.5, canvasWidth / 2);
@@ -603,10 +755,6 @@
 
 	document.getElementById('zoomout').onclick = function() {
 		zoomAt(1 / 1.5, canvasWidth / 2);
-	}
-
-	document.getElementById('restoreBtn').onclick = function() {
-		restoreStacks();
 	}
 
 	document.getElementById('darkmode').onclick = function() {
@@ -639,7 +787,7 @@
 			navIndex = (navIndex + (event.shiftKey ? nav.length - 1 : 1)) % nav.length;
 			zoomFactor = 1; panSamples = 0;
 			render(nav[navIndex]);
-			document.getElementById('matchval').textContent = matchval + ' (' + (navIndex + 1) + ' of ' + nav.length + ')';
+			document.getElementById('matchpct').textContent = matchval + ' (' + (navIndex + 1) + ' of ' + nav.length + ')';
 			window.scroll(0, inverted ? root.level * 16 : canvasHeight - (root.level + 1) * 16);
 			canvas.onmousemove();
 			return false;
@@ -664,6 +812,7 @@
 			return false;
 		}
 	}
+
 
 const cpool = [
 /*cpool:*/
