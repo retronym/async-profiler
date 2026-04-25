@@ -11,6 +11,10 @@
 	header.left {display: flex; align-items: center}
 	button {border: none; background: none; width: 24px; height: 24px; cursor: pointer; margin: 0; padding: 2px 0 0 0; text-align: center}
 	button:hover {background-color: var(--hl-bg); outline: 1px solid var(--hl-border); border-radius: 4px}
+	button:disabled {opacity: 0.3; pointer-events: none}
+	#zoomlevel {font-size: 11px; padding: 0 2px; opacity: 0.75; min-width: 38px; text-align: center; align-self: center}
+	#zoomreset {width: auto; padding: 0 5px; font-size: 11px; font-family: monospace}
+	.btn-sep {display: inline-block; width: 1px; height: 16px; background: var(--hl-border); margin: 0 3px; opacity: 0.5; align-self: center}
 	dl {margin: 0 4px 8px 4px}
 	dt {margin: 1px; padding: 2px 0; font-weight: bold}
 	dd {margin: 1px; padding: 2px 4px}
@@ -74,7 +78,10 @@
 <button id='info' title='Frame type legend and keyboard shortcuts'><svg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 20 20'><circle cx='10' cy='10' r='8' stroke='#004d80' fill='none'/><path d='M10 5.5c-1.25 0-2.25 1-2.25 2.25H9a1.25 1.25 0 0 1 2.5 0c0 .65-.55 1-1 1.2-.7.35-1.25.85-1.25 1.8V11h1.5v-.25c0-.37.29-.65.68-.83.73-.34 1.32-.87 1.32-2.17 0-1.25-1.5-2.25-2.75-2.25' fill='#ff8d40' stroke='#ff8d40' stroke-width='.6' stroke-linecap='round' stroke-linejoin='round'/><circle cx='10' cy='13.5' r='1.2' fill='#ff8d40'/></svg></button>
 <button id='zoomin' title='Zoom in (=)'><svg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 20 20'><circle cx='8' cy='8' r='5.5' stroke='#004d80' fill='none' stroke-width='1.5'/><line x1='12.4' y1='12.4' x2='17' y2='17' stroke='#004d80' stroke-width='2' stroke-linecap='round'/><line x1='5' y1='8' x2='11' y2='8' stroke='#004d80' stroke-width='1.5' stroke-linecap='round'/><line x1='8' y1='5' x2='8' y2='11' stroke='#004d80' stroke-width='1.5' stroke-linecap='round'/></svg></button>
 <button id='zoomout' title='Zoom out (-)'><svg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 20 20'><circle cx='8' cy='8' r='5.5' stroke='#004d80' fill='none' stroke-width='1.5'/><line x1='12.4' y1='12.4' x2='17' y2='17' stroke='#004d80' stroke-width='2' stroke-linecap='round'/><line x1='5' y1='8' x2='11' y2='8' stroke='#004d80' stroke-width='1.5' stroke-linecap='round'/></svg></button>
-<button id='restoreBtn' title='Restore removed stacks' style='display:none'><svg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 20 20'><path d='M3.5 10A6.5 6.5 0 0 0 10 16.5 6.5 6.5 0 0 0 16.5 10 6.5 6.5 0 0 0 12 4' stroke='#e17d00' fill='none' stroke-width='2' stroke-linecap='round'/><polyline points='12,1 12,5 8,4' fill='none' stroke='#e17d00' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/></svg></button>
+<span id='zoomlevel' title='Current zoom level'>100%</span>
+<button id='zoomreset' title='Reset zoom' disabled>1:1</button>
+<span class='btn-sep'></span>
+<button id='restoreBtn' title='Restore removed stacks' disabled><svg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 20 20'><path d='M3.5 10A6.5 6.5 0 0 0 10 16.5 6.5 6.5 0 0 0 16.5 10 6.5 6.5 0 0 0 12 4' stroke='#e17d00' fill='none' stroke-width='2' stroke-linecap='round'/><polyline points='12,1 12,5 8,4' fill='none' stroke='#e17d00' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/></svg></button>
 </header>
 <header style='float: right'>Produced by <a href='https://github.com/async-profiler/async-profiler'>async-profiler</a></header>
 <div id='searchbar'>
@@ -270,7 +277,12 @@
 			levels[h] = newFrames;
 		}
 		stacksRemoved = true;
-		document.getElementById('restoreBtn').style.display = '';
+		document.getElementById('restoreBtn').disabled = false;
+	}
+
+	function updateZoomDisplay() {
+		document.getElementById('zoomlevel').textContent = Math.round(zoomFactor * 100) + '%';
+		document.getElementById('zoomreset').disabled = (zoomFactor === 1);
 	}
 
 	function clampPan() {
@@ -320,7 +332,7 @@
 			levels[h] = newFrames;
 		}
 		stacksRemoved = true;
-		document.getElementById('restoreBtn').style.display = '';
+		document.getElementById('restoreBtn').disabled = false;
 		zoomFactor = 1; panSamples = 0;
 		render(levels[0][0]);
 	}
@@ -332,7 +344,7 @@
 		stacksRemoved = false;
 		filterHistory = [];
 		updateFilterChips();
-		document.getElementById('restoreBtn').style.display = 'none';
+		document.getElementById('restoreBtn').disabled = true;
 		zoomFactor = 1; panSamples = 0;
 		render(levels[0][0]);
 	}
@@ -406,7 +418,9 @@
 			}
 		}
 
-		return totalMarked();
+		const total = totalMarked();
+		updateZoomDisplay();
+		return total;
 	}
 
 	function unpack(cpool) {
@@ -515,8 +529,10 @@
 
 	// ── Event wiring ──────────────────────────────────────────────────────────────
 
+	let currentFrame = null;
+
 	canvas.onmousemove = function() {
-		if (dragStart || selStart) return;
+		if (selStart) return;
 		const h = Math.floor((inverted ? event.offsetY : (canvasHeight - event.offsetY)) / 16);
 		if (h >= 0 && h < levels.length) {
 			const f = findFrame(levels[h], event.offsetX / px + x0Rendered);
@@ -528,7 +544,9 @@
 				hl.firstChild.textContent = f.title;
 				hl.style.display = 'block';
 				canvas.title = f.title + '\n(' + samples(f.width) + f.details + ', ' + pct(f.width, levels[0][0].width) + '%)';
-				canvas.style.cursor = 'pointer';
+				const canRemove = (event.altKey || event.ctrlKey) && h >= root.level && h > 0;
+				canvas.style.cursor = canRemove ? 'no-drop' : 'pointer';
+				currentFrame = f;
 				canvas.onclick = function() {
 					if ((event.altKey || event.ctrlKey) && h >= root.level && h > 0) {
 						removeStack(f.left, f.width);
@@ -552,6 +570,7 @@
 		canvas.title = '';
 		canvas.style.cursor = '';
 		canvas.onclick = null;
+		currentFrame = null;
 	}
 
 	canvas.ondblclick = function() {
@@ -605,16 +624,17 @@
 	}, {passive: false});
 	canvas.addEventListener('touchend', function() { touchData = null; }, {passive: true});
 
-	// Shift+drag to select a zoom area; plain drag to pan when zoomed
+	// Shift+drag to select a zoom area
 	const selbox = document.getElementById('selbox');
-	let dragStart = null;
 	let selStart = null;
 
 	document.addEventListener('keydown', function(e) {
-		if (e.key === 'Shift' && !dragStart) canvas.style.cursor = 'crosshair';
+		if (e.key === 'Shift' && !selStart) canvas.style.cursor = 'crosshair';
+		if ((e.key === 'Control' || e.key === 'Alt') && currentFrame) canvas.style.cursor = 'no-drop';
 	});
 	document.addEventListener('keyup', function(e) {
-		if (e.key === 'Shift' && !selStart) canvas.style.cursor = '';
+		if (e.key === 'Shift' && !selStart) canvas.style.cursor = currentFrame ? (event.ctrlKey || event.altKey ? 'no-drop' : 'pointer') : '';
+		if ((e.key === 'Control' || e.key === 'Alt') && currentFrame) canvas.style.cursor = 'pointer';
 	});
 
 	canvas.addEventListener('mousedown', function(e) {
@@ -628,10 +648,6 @@
 			selbox.style.width = '0px';
 			selbox.style.display = 'block';
 			canvas.onclick = null;
-		} else if (zoomFactor > 1) {
-			dragStart = {x: e.offsetX, pan: panSamples};
-			canvas.style.cursor = 'grab';
-			canvas.onclick = null;
 		}
 	});
 
@@ -641,12 +657,6 @@
 			const x0 = selStart.x, x1 = e.offsetX;
 			selbox.style.left = (rect.left + window.scrollX + Math.min(x0, x1)) + 'px';
 			selbox.style.width = Math.abs(x1 - x0) + 'px';
-		} else if (dragStart) {
-			panSamples = dragStart.pan - (e.offsetX - dragStart.x) / px;
-			clampPan();
-			render(root);
-			hl.style.display = 'none';
-			canvas.style.cursor = 'grabbing';
 		}
 	});
 
@@ -666,9 +676,6 @@
 				clampPan();
 				render(root);
 			}
-		} else if (dragStart) {
-			dragStart = null;
-			canvas.style.cursor = '';
 		}
 	});
 
@@ -748,6 +755,11 @@
 	};
 
 	document.getElementById('restoreBtn').onclick = restoreStacks;
+
+	document.getElementById('zoomreset').onclick = function() {
+		zoomFactor = 1; panSamples = 0;
+		render(root);
+	};
 
 	document.getElementById('zoomin').onclick = function() {
 		zoomAt(1.5, canvasWidth / 2);

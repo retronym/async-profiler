@@ -11,6 +11,10 @@
 	header.left {display: flex; align-items: center}
 	button {border: none; background: none; width: 24px; height: 24px; cursor: pointer; margin: 0; padding: 2px 0 0 0; text-align: center}
 	button:hover {background-color: var(--hl-bg); outline: 1px solid var(--hl-border); border-radius: 4px}
+	button:disabled {opacity: 0.3; pointer-events: none}
+	#zoomlevel {font-size: 11px; padding: 0 2px; opacity: 0.75; min-width: 38px; text-align: center; align-self: center}
+	#zoomreset {width: auto; padding: 0 5px; font-size: 11px; font-family: monospace}
+	.btn-sep {display: inline-block; width: 1px; height: 16px; background: var(--hl-border); margin: 0 3px; opacity: 0.5; align-self: center}
 	dl {margin: 0 4px 8px 4px}
 	dt {margin: 1px; padding: 2px 0; font-weight: bold}
 	dd {margin: 1px; padding: 2px 4px}
@@ -74,7 +78,10 @@
 <button id='info' title='Frame type legend and keyboard shortcuts'><svg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 20 20'><circle cx='10' cy='10' r='8' stroke='#004d80' fill='none'/><path d='M10 5.5c-1.25 0-2.25 1-2.25 2.25H9a1.25 1.25 0 0 1 2.5 0c0 .65-.55 1-1 1.2-.7.35-1.25.85-1.25 1.8V11h1.5v-.25c0-.37.29-.65.68-.83.73-.34 1.32-.87 1.32-2.17 0-1.25-1.5-2.25-2.75-2.25' fill='#ff8d40' stroke='#ff8d40' stroke-width='.6' stroke-linecap='round' stroke-linejoin='round'/><circle cx='10' cy='13.5' r='1.2' fill='#ff8d40'/></svg></button>
 <button id='zoomin' title='Zoom in (=)'><svg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 20 20'><circle cx='8' cy='8' r='5.5' stroke='#004d80' fill='none' stroke-width='1.5'/><line x1='12.4' y1='12.4' x2='17' y2='17' stroke='#004d80' stroke-width='2' stroke-linecap='round'/><line x1='5' y1='8' x2='11' y2='8' stroke='#004d80' stroke-width='1.5' stroke-linecap='round'/><line x1='8' y1='5' x2='8' y2='11' stroke='#004d80' stroke-width='1.5' stroke-linecap='round'/></svg></button>
 <button id='zoomout' title='Zoom out (-)'><svg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 20 20'><circle cx='8' cy='8' r='5.5' stroke='#004d80' fill='none' stroke-width='1.5'/><line x1='12.4' y1='12.4' x2='17' y2='17' stroke='#004d80' stroke-width='2' stroke-linecap='round'/><line x1='5' y1='8' x2='11' y2='8' stroke='#004d80' stroke-width='1.5' stroke-linecap='round'/></svg></button>
-<button id='restoreBtn' title='Restore removed stacks' style='display:none'><svg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 20 20'><path d='M3.5 10A6.5 6.5 0 0 0 10 16.5 6.5 6.5 0 0 0 16.5 10 6.5 6.5 0 0 0 12 4' stroke='#e17d00' fill='none' stroke-width='2' stroke-linecap='round'/><polyline points='12,1 12,5 8,4' fill='none' stroke='#e17d00' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/></svg></button>
+<span id='zoomlevel' title='Current zoom level'>100%</span>
+<button id='zoomreset' title='Reset zoom' disabled>1:1</button>
+<span class='btn-sep'></span>
+<button id='restoreBtn' title='Restore removed stacks' disabled><svg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 20 20'><path d='M3.5 10A6.5 6.5 0 0 0 10 16.5 6.5 6.5 0 0 0 16.5 10 6.5 6.5 0 0 0 12 4' stroke='#e17d00' fill='none' stroke-width='2' stroke-linecap='round'/><polyline points='12,1 12,5 8,4' fill='none' stroke='#e17d00' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/></svg></button>
 </header>
 <header style='float: right'>Produced by <a href='https://github.com/async-profiler/async-profiler'>async-profiler</a></header>
 <div id='searchbar'>

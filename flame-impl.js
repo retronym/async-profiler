@@ -128,7 +128,12 @@ function removeStack(left, width) {
 		levels[h] = newFrames;
 	}
 	stacksRemoved = true;
-	document.getElementById('restoreBtn').style.display = '';
+	document.getElementById('restoreBtn').disabled = false;
+}
+
+function updateZoomDisplay() {
+	document.getElementById('zoomlevel').textContent = Math.round(zoomFactor * 100) + '%';
+	document.getElementById('zoomreset').disabled = (zoomFactor === 1);
 }
 
 function clampPan() {
@@ -178,7 +183,7 @@ function keepOnlyMatched(term) {
 		levels[h] = newFrames;
 	}
 	stacksRemoved = true;
-	document.getElementById('restoreBtn').style.display = '';
+	document.getElementById('restoreBtn').disabled = false;
 	zoomFactor = 1; panSamples = 0;
 	// Re-run search on the reduced data so nav and matchpct stay accurate
 	// const term = document.getElementById('searchinput').value;
@@ -196,7 +201,7 @@ function restoreStacks() {
 	stacksRemoved = false;
 	filterHistory = [];
 	updateFilterChips();
-	document.getElementById('restoreBtn').style.display = 'none';
+	document.getElementById('restoreBtn').disabled = true;
 	zoomFactor = 1; panSamples = 0;
 	render(levels[0][0]);
 }
@@ -270,7 +275,9 @@ function render(newRoot, nav) {
 		}
 	}
 
-	return totalMarked();
+	const total = totalMarked();
+	updateZoomDisplay();
+	return total;
 }
 
 function unpack(cpool) {
@@ -380,7 +387,7 @@ function search(r) {
 // ── Event wiring ──────────────────────────────────────────────────────────────
 
 canvas.onmousemove = function() {
-	if (dragStart || selStart) return;
+	if (selStart) return;
 	const h = Math.floor((inverted ? event.offsetY : (canvasHeight - event.offsetY)) / 16);
 	if (h >= 0 && h < levels.length) {
 		const f = findFrame(levels[h], event.offsetX / px + x0Rendered);
@@ -392,7 +399,9 @@ canvas.onmousemove = function() {
 			hl.firstChild.textContent = f.title;
 			hl.style.display = 'block';
 			canvas.title = f.title + '\n(' + samples(f.width) + f.details + ', ' + pct(f.width, levels[0][0].width) + '%)';
-			canvas.style.cursor = 'pointer';
+			const canRemove = (event.altKey || event.ctrlKey) && h >= root.level && h > 0;
+			canvas.style.cursor = canRemove ? 'no-drop' : 'pointer';
+			currentFrame = f;
 			canvas.onclick = function() {
 				if ((event.altKey || event.ctrlKey) && h >= root.level && h > 0) {
 					removeStack(f.left, f.width);
@@ -416,6 +425,7 @@ canvas.onmouseout = function() {
 	canvas.title = '';
 	canvas.style.cursor = '';
 	canvas.onclick = null;
+	currentFrame = null;
 }
 
 canvas.ondblclick = function() {
@@ -469,16 +479,20 @@ canvas.addEventListener('touchmove', function(e) {
 }, {passive: false});
 canvas.addEventListener('touchend', function() { touchData = null; }, {passive: true});
 
-// Shift+drag to select a zoom area; plain drag to pan when zoomed
+// Shift+drag to select a zoom area
 const selbox = document.getElementById('selbox');
-let dragStart = null;
 let selStart = null;
 
+// Track the currently hovered frame so keydown/keyup can update the cursor
+let currentFrame = null;
+
 document.addEventListener('keydown', function(e) {
-	if (e.key === 'Shift' && !dragStart) canvas.style.cursor = 'crosshair';
+	if (e.key === 'Shift' && !selStart) canvas.style.cursor = 'crosshair';
+	if ((e.key === 'Control' || e.key === 'Alt') && currentFrame) canvas.style.cursor = 'no-drop';
 });
 document.addEventListener('keyup', function(e) {
-	if (e.key === 'Shift' && !selStart) canvas.style.cursor = '';
+	if (e.key === 'Shift' && !selStart) canvas.style.cursor = currentFrame ? (event.ctrlKey || event.altKey ? 'no-drop' : 'pointer') : '';
+	if ((e.key === 'Control' || e.key === 'Alt') && currentFrame) canvas.style.cursor = 'pointer';
 });
 
 canvas.addEventListener('mousedown', function(e) {
@@ -492,10 +506,6 @@ canvas.addEventListener('mousedown', function(e) {
 		selbox.style.width = '0px';
 		selbox.style.display = 'block';
 		canvas.onclick = null;
-	} else if (zoomFactor > 1) {
-		dragStart = {x: e.offsetX, pan: panSamples};
-		canvas.style.cursor = 'grab';
-		canvas.onclick = null;
 	}
 });
 
@@ -505,12 +515,6 @@ canvas.addEventListener('mousemove', function(e) {
 		const x0 = selStart.x, x1 = e.offsetX;
 		selbox.style.left = (rect.left + window.scrollX + Math.min(x0, x1)) + 'px';
 		selbox.style.width = Math.abs(x1 - x0) + 'px';
-	} else if (dragStart) {
-		panSamples = dragStart.pan - (e.offsetX - dragStart.x) / px;
-		clampPan();
-		render(root);
-		hl.style.display = 'none';
-		canvas.style.cursor = 'grabbing';
 	}
 });
 
@@ -530,9 +534,6 @@ document.addEventListener('mouseup', function(e) {
 			clampPan();
 			render(root);
 		}
-	} else if (dragStart) {
-		dragStart = null;
-		canvas.style.cursor = '';
 	}
 });
 
@@ -613,6 +614,11 @@ document.getElementById('modeFilt').onclick = function() {
 };
 
 document.getElementById('restoreBtn').onclick = restoreStacks;
+
+document.getElementById('zoomreset').onclick = function() {
+	zoomFactor = 1; panSamples = 0;
+	render(root);
+};
 
 document.getElementById('zoomin').onclick = function() {
 	zoomAt(1.5, canvasWidth / 2);
