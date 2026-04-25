@@ -11,7 +11,7 @@
 	header.left {display: flex; align-items: center}
 	button {border: none; background: none; width: 24px; height: 24px; cursor: pointer; margin: 0; padding: 2px 0 0 0; text-align: center}
 	button:hover {background-color: var(--hl-bg); outline: 1px solid var(--hl-border); border-radius: 4px}
-	button:disabled {opacity: 0.3; pointer-events: none}
+	button:disabled {opacity: 0.45; pointer-events: none; filter: grayscale(0.6)}
 	#zoomlevel {font-size: 11px; padding: 0 2px; opacity: 0.75; min-width: 38px; text-align: center; align-self: center}
 	#zoomreset {width: auto; padding: 0 5px; font-size: 11px; font-family: monospace}
 	.btn-sep {display: inline-block; width: 1px; height: 16px; background: var(--hl-border); margin: 0 3px; opacity: 0.5; align-self: center}
@@ -41,7 +41,7 @@
 	#recentWrap {position: relative; display: flex; align-items: center}
 	#recentBtn {width: 16px; height: 22px; padding: 0; font-size: 9px; border-right: 1px solid var(--hl-border); border-radius: 0; margin-right: 2px}
 	#recentDropdown {display: none; position: absolute; top: calc(100% + 4px); left: -3px; z-index: 30; background: var(--legend-bg); border: 1px solid var(--legend-border); border-radius: 4px; min-width: 180px; max-height: 200px; overflow-y: auto; box-shadow: 0 2px 8px rgba(0,0,0,0.2)}
-	#recentDropdown button {display: block; width: 100%; height: auto; text-align: left; padding: 4px 8px; font: 12px Verdana,sans-serif; border-radius: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis}
+	#recentDropdown button {display: block; width: 100%; height: auto; text-align: left; padding: 4px 8px; font: 12px Verdana,sans-serif; border-radius: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--fg); background: transparent}
 	#searchinput {width: 220px; height: 22px; font: 12px Verdana,sans-serif; border: 1px solid var(--hl-border); border-radius: 3px; background: var(--bg); color: var(--fg); padding: 0 5px; outline: none; box-sizing: border-box}
 	#searchinput:focus {border-color: var(--link)}
 	.search-toggle {width: auto; min-width: 24px; height: 22px; padding: 0 5px; font-size: 11px; font-family: monospace; border-radius: 3px; color: var(--fg)}
@@ -53,7 +53,7 @@
 	.filt-chip-and {font-size: 10px; opacity: 0.5; font-style: italic}
 	#matchpct {font-size: 11px; padding: 0 6px; opacity: 0.75; white-space: nowrap; border-left: 1px solid var(--hl-border)}
 	#modeseg {display: inline-flex; border: 1px solid var(--hl-border); border-radius: 3px; overflow: hidden; flex-shrink: 0}
-	.mode-btn {width: auto; height: 22px; padding: 0 8px; font-size: 11px; border-radius: 0; border-right: 1px solid var(--hl-border)}
+	.mode-btn {width: auto; height: 22px; padding: 0 8px; font-size: 11px; border-radius: 0; border-right: 1px solid var(--hl-border); color: var(--fg); background: var(--bg)}
 	.mode-btn:last-child {border-right: none}
 	.mode-btn.active {background: var(--link); color: #fff}
 	.mode-btn.active:hover {background: var(--link); outline: none}
