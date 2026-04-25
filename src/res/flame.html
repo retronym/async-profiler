@@ -40,9 +40,13 @@
 	#buptrack {height: 4px; background: var(--hl-border); border-radius: 2px; margin-bottom: 2px; opacity: 0.4}
 	#bupbar {height: 100%; width: 0; background: var(--link); border-radius: 2px; transition: width 80ms linear}
 	#buplabel {font-size: 10px; opacity: 0.6; color: var(--fg)}
-	/* Search row — second toolbar line, left-aligned under search icon */
-	#searchbar {display: none; align-items: center; padding: 3px 0 4px; gap: 4px; clear: left}
+	/* Search panel — column of rows below toolbar, left-aligned */
+	#searchbar {display: none; flex-direction: column; clear: left}
 	#searchbar.open {display: flex}
+	#searchrow {display: flex; align-items: center; gap: 4px; padding: 3px 0 2px}
+	#filtrow, #hlrow {display: none; align-items: center; gap: 3px; padding: 1px 0 3px; flex-wrap: wrap}
+	#filtrow.visible, #hlrow.visible {display: flex}
+	.chip-label {font-size: 10px; opacity: 0.55; font-style: italic; white-space: nowrap; color: var(--fg)}
 	#recentWrap {position: relative; display: flex; align-items: center}
 	#recentBtn {width: 16px; height: 22px; padding: 0; font-size: 9px; border-right: 1px solid var(--hl-border); border-radius: 0; margin-right: 2px; color: var(--fg)}
 	#recentDropdown {display: none; position: absolute; top: calc(100% + 4px); left: -3px; z-index: 30; background: var(--legend-bg); border: 1px solid var(--legend-border); border-radius: 4px; min-width: 180px; max-height: 200px; overflow-y: auto; box-shadow: 0 2px 8px rgba(0,0,0,0.2)}
@@ -52,16 +56,25 @@
 	.search-toggle {width: auto; min-width: 24px; height: 22px; padding: 0 5px; font-size: 11px; font-family: monospace; border-radius: 3px; color: var(--fg)}
 	.search-toggle.active {background: var(--link); color: #fff; outline: none}
 	.search-toggle.active:hover {background: var(--link); outline: none}
-	#filtchips {display: none; align-items: center; gap: 3px; flex-shrink: 0}
-	#filtchips.visible {display: flex}
-	.filt-chip {font-size: 11px; padding: 1px 6px; background: var(--hl-bg); border: 1px solid var(--hl-border); border-radius: 10px; white-space: nowrap; color: var(--fg); cursor: default}
-	.filt-chip-and {font-size: 10px; opacity: 0.5; font-style: italic}
 	#matchpct {font-size: 11px; padding: 0 6px; opacity: 0.75; white-space: nowrap; border-left: 1px solid var(--hl-border)}
-	#modeseg {display: inline-flex; border: 1px solid var(--hl-border); border-radius: 3px; overflow: hidden; flex-shrink: 0}
-	.mode-btn {width: auto; height: 22px; padding: 0 8px; font-size: 11px; border-radius: 0; border-right: 1px solid var(--hl-border); color: var(--fg); background: var(--bg)}
-	.mode-btn:last-child {border-right: none}
-	.mode-btn.active {background: var(--link); color: #fff}
-	.mode-btn.active:hover {background: var(--link); outline: none}
+	/* Highlight split button */
+	#hlsplit {position: relative; display: inline-flex; border: 1px solid var(--hl-border); border-radius: 3px; overflow: visible; flex-shrink: 0}
+	#hlbtn {width: auto; height: 22px; padding: 0 6px; font-size: 11px; display: inline-flex; align-items: center; gap: 4px; color: var(--fg); border-radius: 0}
+	#hlstrip {width: 13px; height: 22px; font-size: 9px; padding: 0; border-left: 1px solid var(--hl-border); color: var(--fg); border-radius: 0}
+	#filtbtn {width: auto; height: 22px; padding: 0 8px; font-size: 11px; color: var(--fg); border-radius: 3px; border: 1px solid var(--hl-border)}
+	/* Color picker */
+	#colorpicker {display: none; position: absolute; top: calc(100% + 3px); left: 0; z-index: 30; background: var(--legend-bg); border: 1px solid var(--legend-border); border-radius: 4px; padding: 5px; gap: 4px; flex-wrap: wrap; width: 84px; box-shadow: 0 2px 8px rgba(0,0,0,0.2)}
+	#colorpicker.open {display: flex}
+	.color-swatch {width: 16px; height: 16px; border-radius: 3px; cursor: pointer; border: 2px solid transparent; flex-shrink: 0; box-sizing: border-box}
+	.color-swatch.selected {border-color: var(--fg)}
+	.color-swatch:hover {outline: 1px solid var(--fg)}
+	/* Highlight and filter chips */
+	.hl-dot {width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex-shrink: 0}
+	.hl-chip {font-size: 11px; padding: 1px 3px 1px 5px; border: 1px solid; border-radius: 10px; white-space: nowrap; color: var(--fg); display: inline-flex; align-items: center; gap: 3px}
+	.filt-chip {font-size: 11px; padding: 1px 6px; background: var(--hl-bg); border: 1px solid var(--hl-border); border-radius: 10px; white-space: nowrap; color: var(--fg); cursor: default}
+	.filt-chip-and {font-size: 10px; opacity: 0.5; font-style: italic; padding: 0 1px}
+	.chip-x {width: 14px; height: 14px; font-size: 11px; padding: 0; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; color: var(--fg); opacity: 0.55; line-height: 1}
+	.chip-x:hover {opacity: 1; background: rgba(128,128,128,0.25); outline: none}
 </style>
 <script>
 {
@@ -91,19 +104,29 @@
 </header>
 <header style='float: right'>Produced by <a href='https://github.com/async-profiler/async-profiler'>async-profiler</a></header>
 <div id='searchbar'>
-  <span id='recentWrap'>
-    <button id='recentBtn' title='Recent searches'>&#x25be;</button>
-    <div id='recentDropdown'></div>
-  </span>
-  <span id='filtchips' title='Applied filters (AND — each successive filter narrows the previous result)'></span>
-  <input id='searchinput' type='text' placeholder='Search…' autocomplete='off' spellcheck='false'>
-  <button id='toggleCase' class='search-toggle' title='Case sensitive (Alt+C)'>Cc</button>
-  <button id='toggleRegex' class='search-toggle' title='Regular expression (Alt+R)'>.*</button>
-  <span id='matchpct' title='Fraction of visible samples whose call stack contains a matching frame'></span>
-  <span id='modeseg'>
-    <button id='modeHL' class='mode-btn active' title='Highlight matching frames — navigate with N / Shift+N'>Highlight</button>
-    <button id='modeFilt' class='mode-btn' title='Remove all stacks containing no matching frames — click or Enter to apply'>Filter</button>
-  </span>
+  <div id='searchrow'>
+    <span id='recentWrap'>
+      <button id='recentBtn' title='Recent searches'>&#x25be;</button>
+      <div id='recentDropdown'></div>
+    </span>
+    <input id='searchinput' type='text' placeholder='Search…' autocomplete='off' spellcheck='false'>
+    <button id='toggleCase' class='search-toggle' title='Case sensitive (Alt+C)'>Cc</button>
+    <button id='toggleRegex' class='search-toggle' title='Regular expression (Alt+R)'>.*</button>
+    <span id='matchpct' title='Fraction of visible samples whose call stack contains a matching frame'></span>
+    <span id='hlsplit'>
+      <button id='hlbtn' title='Commit as highlight chip (Enter)'><span id='hlcolordot' class='hl-dot'></span>Hl</button><button id='hlstrip' title='Choose highlight color'>&#x25be;</button>
+      <div id='colorpicker'></div>
+    </span>
+    <button id='filtbtn' title='Filter to matching frames (keep only stacks with a match)'>Filter</button>
+  </div>
+  <div id='filtrow'>
+    <span class='chip-label'>Filters:</span>
+    <span id='filtchips'></span>
+  </div>
+  <div id='hlrow'>
+    <span class='chip-label'>Highlights:</span>
+    <span id='hlchips'></span>
+  </div>
 </div>
 <div id='buprogress'>
   <div id='buptrack'><div id='bupbar'></div></div>
@@ -145,7 +168,7 @@
 	<dt>Bottom-up button</dt><dd>Regroup by leaf frames — computed once, cached</dd>
 	<dt>Ctrl+F</dt><dd>Open search</dd>
 	<dt>Esc</dt><dd>Close search</dd>
-	<dt>Enter</dt><dd>Apply filter (in Filter mode)</dd>
+	<dt>Enter</dt><dd>Commit highlight chip from search term</dd>
 	<dt>N / Shift+N</dt><dd>Next / previous match</dd>
 </dl>
 </div>
@@ -407,7 +430,18 @@
 
 		function drawFrame(f, y) {
 			if (f.left < x1 && f.left + f.width > x0) {
-				c.fillStyle = pattern && f.title.match(pattern) && mark(f) ? '#ee00ee' : f.color;
+				let hlColor = null;
+				if (pattern && f.title.match(pattern)) {
+					mark(f);
+					hlColor = currentHighlightColor;
+				} else {
+					for (let ci = 0; ci < highlightChips.length; ci++) {
+						if (f.title.match(highlightChips[ci].pattern)) { hlColor = highlightChips[ci].color; break; }
+					}
+				}
+				const dim = (pattern || highlightChips.length > 0) && !hlColor;
+				c.globalAlpha = dim ? 0.2 : 1.0;
+				c.fillStyle = hlColor || f.color;
 				c.fillRect((f.left - x0) * px, y, f.width * px, 15);
 
 				if (f.width * px >= 21) {
@@ -417,6 +451,7 @@
 					c.fillText(title, Math.max(f.left - x0, 0) * px + 3, y + 12, f.width * px - 6);
 				}
 
+				c.globalAlpha = 1.0;
 				if (f.level < root.level) {
 					c.fillStyle = bg + '80';
 					c.fillRect((f.left - x0) * px, y, f.width * px, 15);
@@ -447,8 +482,10 @@
 
 	let useRegex = false;
 	let caseSensitive = false;
-	let filterMode = false;
 	let filterHistory = [];
+	const HIGHLIGHT_COLORS = ['#ee00ee','#ff6600','#00bb44','#0099ff','#ffcc00','#ff2244','#00ccbb','#9944ff'];
+	let currentHighlightColor = HIGHLIGHT_COLORS[0];
+	let highlightChips = []; // [{term, pattern, color}]
 
 	function updateFilterChips() {
 		const el = document.getElementById('filtchips');
@@ -466,7 +503,76 @@
 			chip.title = 'Applied filter: ' + term;
 			el.appendChild(chip);
 		});
-		el.classList.toggle('visible', filterHistory.length > 0);
+		document.getElementById('filtrow').classList.toggle('visible', filterHistory.length > 0);
+	}
+
+	function updateHighlightChips() {
+		const el = document.getElementById('hlchips');
+		el.innerHTML = '';
+		highlightChips.forEach(function(chip, i) {
+			const span = document.createElement('span');
+			span.className = 'hl-chip';
+			span.style.borderColor = chip.color;
+			const dot = document.createElement('span');
+			dot.className = 'hl-dot';
+			dot.style.background = chip.color;
+			const label = document.createElement('span');
+			label.textContent = chip.term;
+			const x = document.createElement('button');
+			x.className = 'chip-x';
+			x.textContent = '\u00d7';
+			x.onclick = (function(idx) { return function(e) {
+				e.stopPropagation();
+				highlightChips.splice(idx, 1);
+				updateHighlightChips();
+				render(root);
+			}; })(i);
+			span.appendChild(dot); span.appendChild(label); span.appendChild(x);
+			el.appendChild(span);
+		});
+		document.getElementById('hlrow').classList.toggle('visible', highlightChips.length > 0);
+		const dot = document.getElementById('hlcolordot');
+		if (dot) dot.style.background = currentHighlightColor;
+	}
+
+	function addHighlightChip(term) {
+		if (!term) return;
+		if (highlightChips.some(function(c) { return c.term === term; })) return;
+		let pat;
+		try {
+			pat = RegExp(useRegex ? term : term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), caseSensitive ? '' : 'i');
+		} catch(e) { return; }
+		highlightChips.push({term: term, pattern: pat, color: currentHighlightColor});
+		const used = new Set(highlightChips.map(function(c) { return c.color; }));
+		currentHighlightColor = HIGHLIGHT_COLORS.find(function(c) { return !used.has(c); }) || HIGHLIGHT_COLORS[0];
+		updateHighlightChips();
+		document.querySelectorAll('.color-swatch').forEach(function(s) {
+			s.classList.toggle('selected', s.dataset.color === currentHighlightColor);
+		});
+		document.getElementById('searchinput').value = '';
+		search('');
+	}
+
+	function buildColorPicker() {
+		const picker = document.getElementById('colorpicker');
+		HIGHLIGHT_COLORS.forEach(function(color) {
+			const s = document.createElement('div');
+			s.className = 'color-swatch' + (color === currentHighlightColor ? ' selected' : '');
+			s.style.background = color;
+			s.dataset.color = color;
+			s.onclick = function(e) {
+				e.stopPropagation();
+				currentHighlightColor = color;
+				picker.classList.remove('open');
+				document.querySelectorAll('.color-swatch').forEach(function(sw) {
+					sw.classList.toggle('selected', sw.dataset.color === currentHighlightColor);
+				});
+				const dot = document.getElementById('hlcolordot');
+				if (dot) dot.style.background = currentHighlightColor;
+				if (pattern) render(root);
+			};
+			picker.appendChild(s);
+		});
 	}
 
 	// Recent search history (persisted in localStorage)
@@ -532,7 +638,12 @@
 		navIndex = -1;
 		const matchpct = document.getElementById('matchpct');
 		if (r) {
-			matchval = pct(matched, root.width) + '% matched';
+			const visiblePct = pct(matched, root.width);
+			const origTotal = typeof originalLevels !== 'undefined' ? originalLevels[0][0].width : root.width;
+			const allPct = pct(matched, origTotal);
+			matchval = root.width !== origTotal
+				? visiblePct + '% (' + allPct + '% of all)'
+				: visiblePct + '% matched';
 			matchpct.textContent = matchval;
 			matchpct.style.display = '';
 		} else {
@@ -723,14 +834,9 @@
 	document.getElementById('searchinput').onkeydown = function(e) {
 		if (e.key === 'Escape') {
 			closeSearch();
-		} else if (e.key === 'Enter') {
-			if (filterMode && nav.length > 0) {
-				addToHistory(this.value);
-				keepOnlyMatched(this.value);
-				// Stay in search — user may want to refine and filter again
-			} else if (this.value) {
-				addToHistory(this.value);
-			}
+		} else if (e.key === 'Enter' && this.value) {
+			addToHistory(this.value);
+			addHighlightChip(this.value);
 			e.preventDefault();
 		}
 		e.stopPropagation();
@@ -749,24 +855,31 @@
 		search(document.getElementById('searchinput').value);
 	};
 
-	document.getElementById('modeHL').onclick = function() {
-		filterMode = false;
-		restoreStacks();
-		this.classList.add('active');
-		document.getElementById('modeFilt').classList.remove('active');
+	document.getElementById('hlbtn').onclick = function() {
+		const term = document.getElementById('searchinput').value;
+		if (term) { addToHistory(term); addHighlightChip(term); }
 	};
 
-	document.getElementById('modeFilt').onclick = function() {
-		filterMode = true;
-		this.classList.add('active');
-		document.getElementById('modeHL').classList.remove('active');
-		// Apply immediately if there are current matches
+	document.getElementById('hlstrip').onclick = function(e) {
+		e.stopPropagation();
+		document.getElementById('colorpicker').classList.toggle('open');
+	};
+
+	document.addEventListener('click', function() {
+		document.getElementById('colorpicker').classList.remove('open');
+	});
+
+	document.getElementById('filtbtn').onclick = function() {
 		const term = document.getElementById('searchinput').value;
-		if (nav && nav.length > 0) {
+		if (term && nav && nav.length > 0) {
 			addToHistory(term);
 			keepOnlyMatched(term);
+			document.getElementById('searchinput').value = '';
+			search('');
 		}
 	};
+
+	buildColorPicker();
 
 	document.getElementById('restoreBtn').onclick = restoreStacks;
 
@@ -874,6 +987,7 @@ self.postMessage({progress:1.0,stage:'Done'});self.postMessage({result:newLevels
 		pattern = undefined; nav = []; navIndex = -1; matchval = '';
 		document.getElementById('matchpct').style.display = 'none';
 		filterHistory = []; updateFilterChips();
+		highlightChips = []; updateHighlightChips();
 		stacksRemoved = false;
 		document.getElementById('restoreBtn').disabled = true;
 	}

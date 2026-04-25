@@ -250,7 +250,19 @@ function render(newRoot, nav) {
 
 	function drawFrame(f, y) {
 		if (f.left < x1 && f.left + f.width > x0) {
-			c.fillStyle = pattern && f.title.match(pattern) && mark(f) ? '#ee00ee' : f.color;
+			// Determine highlight color: live search first, then chips in order
+			let hlColor = null;
+			if (pattern && f.title.match(pattern)) {
+				mark(f);
+				hlColor = currentHighlightColor;
+			} else {
+				for (let ci = 0; ci < highlightChips.length; ci++) {
+					if (f.title.match(highlightChips[ci].pattern)) { hlColor = highlightChips[ci].color; break; }
+				}
+			}
+			const dim = (pattern || highlightChips.length > 0) && !hlColor;
+			c.globalAlpha = dim ? 0.2 : 1.0;
+			c.fillStyle = hlColor || f.color;
 			c.fillRect((f.left - x0) * px, y, f.width * px, 15);
 
 			if (f.width * px >= 21) {
@@ -260,6 +272,7 @@ function render(newRoot, nav) {
 				c.fillText(title, Math.max(f.left - x0, 0) * px + 3, y + 12, f.width * px - 6);
 			}
 
+			c.globalAlpha = 1.0;
 			if (f.level < root.level) {
 				c.fillStyle = bg + '80';
 				c.fillRect((f.left - x0) * px, y, f.width * px, 15);
@@ -290,8 +303,12 @@ function unpack(cpool) {
 
 let useRegex = false;
 let caseSensitive = false;
-let filterMode = false;
 let filterHistory = [];
+
+// Highlight chips — persistent named highlights each with their own color
+const HIGHLIGHT_COLORS = ['#ee00ee','#ff6600','#00bb44','#0099ff','#ffcc00','#ff2244','#00ccbb','#9944ff'];
+let currentHighlightColor = HIGHLIGHT_COLORS[0];
+let highlightChips = []; // [{term, pattern, color}]
 
 function updateFilterChips() {
 	const el = document.getElementById('filtchips');
@@ -309,7 +326,89 @@ function updateFilterChips() {
 		chip.title = 'Applied filter: ' + term;
 		el.appendChild(chip);
 	});
-	el.classList.toggle('visible', filterHistory.length > 0);
+	document.getElementById('filtrow').classList.toggle('visible', filterHistory.length > 0);
+}
+
+function updateHighlightChips() {
+	const el = document.getElementById('hlchips');
+	el.innerHTML = '';
+	highlightChips.forEach(function(chip, i) {
+		const span = document.createElement('span');
+		span.className = 'hl-chip';
+		span.style.borderColor = chip.color;
+
+		const dot = document.createElement('span');
+		dot.className = 'hl-dot';
+		dot.style.background = chip.color;
+
+		const label = document.createElement('span');
+		label.textContent = chip.term;
+
+		const x = document.createElement('button');
+		x.className = 'chip-x';
+		x.textContent = '×';
+		x.title = 'Remove highlight';
+		x.onclick = (function(idx) { return function(e) {
+			e.stopPropagation();
+			highlightChips.splice(idx, 1);
+			updateHighlightChips();
+			render(root);
+		}; })(i);
+
+		span.appendChild(dot);
+		span.appendChild(label);
+		span.appendChild(x);
+		el.appendChild(span);
+	});
+	document.getElementById('hlrow').classList.toggle('visible', highlightChips.length > 0);
+	// Sync color dot on the Hl button
+	const dot = document.getElementById('hlcolordot');
+	if (dot) dot.style.background = currentHighlightColor;
+}
+
+function addHighlightChip(term) {
+	if (!term) return;
+	// Don't duplicate
+	if (highlightChips.some(function(c) { return c.term === term; })) return;
+	let pat;
+	try {
+		pat = RegExp(useRegex ? term : term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), caseSensitive ? '' : 'i');
+	} catch(e) { return; }
+	highlightChips.push({term, pattern: pat, color: currentHighlightColor});
+	// Advance to next unused color
+	const used = new Set(highlightChips.map(function(c) { return c.color; }));
+	currentHighlightColor = HIGHLIGHT_COLORS.find(function(c) { return !used.has(c); }) || HIGHLIGHT_COLORS[0];
+	updateHighlightChips();
+	// Update color picker selection
+	document.querySelectorAll('.color-swatch').forEach(function(s) {
+		s.classList.toggle('selected', s.dataset.color === currentHighlightColor);
+	});
+	document.getElementById('searchinput').value = '';
+	search('');
+}
+
+function buildColorPicker() {
+	const picker = document.getElementById('colorpicker');
+	HIGHLIGHT_COLORS.forEach(function(color) {
+		const s = document.createElement('div');
+		s.className = 'color-swatch' + (color === currentHighlightColor ? ' selected' : '');
+		s.style.background = color;
+		s.dataset.color = color;
+		s.title = color;
+		s.onclick = function(e) {
+			e.stopPropagation();
+			currentHighlightColor = color;
+			picker.classList.remove('open');
+			document.querySelectorAll('.color-swatch').forEach(function(sw) {
+				sw.classList.toggle('selected', sw.dataset.color === color);
+			});
+			const dot = document.getElementById('hlcolordot');
+			if (dot) dot.style.background = color;
+			const inp = document.getElementById('searchinput');
+			if (inp.value) search(inp.value);
+		};
+		picker.appendChild(s);
+	});
 }
 
 // Recent search history (persisted in localStorage)
@@ -363,11 +462,9 @@ function search(r) {
 	let pat;
 	if (r) {
 		try {
-			const flags = caseSensitive ? '' : 'i';
-			const expr = useRegex ? r : r.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-			pat = RegExp(expr, flags);
+			pat = RegExp(useRegex ? r : r.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), caseSensitive ? '' : 'i');
 		} catch (e) {
-			pat = undefined; // invalid regex — skip highlight
+			pat = undefined;
 		}
 	}
 	pattern = pat;
@@ -375,7 +472,12 @@ function search(r) {
 	navIndex = -1;
 	const matchpct = document.getElementById('matchpct');
 	if (r) {
-		matchval = pct(matched, root.width) + '% matched';
+		const visiblePct = pct(matched, root.width);
+		const origTotal = typeof originalLevels !== 'undefined' ? originalLevels[0][0].width : root.width;
+		const allPct = pct(matched, origTotal);
+		matchval = root.width !== origTotal
+			? visiblePct + '% (' + allPct + '% of all)'
+			: visiblePct + '% matched';
 		matchpct.textContent = matchval;
 		matchpct.style.display = '';
 	} else {
@@ -537,7 +639,7 @@ document.addEventListener('mouseup', function(e) {
 	}
 });
 
-// Close recent dropdown on any outside click
+// Close dropdowns on any outside click
 document.addEventListener('click', function() {
 	document.getElementById('recentDropdown').style.display = 'none';
 });
@@ -567,14 +669,9 @@ document.getElementById('searchinput').oninput = function() {
 document.getElementById('searchinput').onkeydown = function(e) {
 	if (e.key === 'Escape') {
 		closeSearch();
-	} else if (e.key === 'Enter') {
-		if (filterMode && nav.length > 0) {
-			addToHistory(this.value);
-			keepOnlyMatched(this.value);
-			// Stay in search — user may want to refine and filter again
-		} else if (this.value) {
-			addToHistory(this.value);
-		}
+	} else if (e.key === 'Enter' && this.value) {
+		addToHistory(this.value);
+		addHighlightChip(this.value);
 		e.preventDefault();
 	}
 	e.stopPropagation();
@@ -593,25 +690,32 @@ document.getElementById('toggleRegex').onclick = function() {
 	search(document.getElementById('searchinput').value);
 };
 
-document.getElementById('modeHL').onclick = function() {
-	filterMode = false;
-	restoreStacks()
-	this.classList.add('active');
-	document.getElementById('modeFilt').classList.remove('active');
-
+document.getElementById('hlbtn').onclick = function() {
+	const term = document.getElementById('searchinput').value;
+	if (term) { addToHistory(term); addHighlightChip(term); }
 };
 
-document.getElementById('modeFilt').onclick = function() {
-	filterMode = true;
-	this.classList.add('active');
-	document.getElementById('modeHL').classList.remove('active');
-	// Apply immediately if there are current matches
+document.getElementById('hlstrip').onclick = function(e) {
+	e.stopPropagation();
+	document.getElementById('colorpicker').classList.toggle('open');
+};
+
+document.getElementById('filtbtn').onclick = function() {
 	const term = document.getElementById('searchinput').value;
-	if (nav && nav.length > 0) {
+	if (term && nav && nav.length > 0) {
 		addToHistory(term);
 		keepOnlyMatched(term);
+		document.getElementById('searchinput').value = '';
+		search('');
 	}
 };
+
+// Close color picker on any outside click
+document.addEventListener('click', function() {
+	document.getElementById('colorpicker').classList.remove('open');
+});
+
+buildColorPicker();
 
 document.getElementById('restoreBtn').onclick = restoreStacks;
 
@@ -813,6 +917,7 @@ function _resetView() {
     pattern = undefined; nav = []; navIndex = -1; matchval = '';
     document.getElementById('matchpct').style.display = 'none';
     filterHistory = []; updateFilterChips();
+    highlightChips = []; updateHighlightChips();
     stacksRemoved = false;
     document.getElementById('restoreBtn').disabled = true;
 }
