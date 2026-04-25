@@ -683,3 +683,198 @@ window.onkeydown = function(event) {
 		return false;
 	}
 }
+
+// ── Bottom-up (reverse) view ──────────────────────────────────────────────────
+//
+// Regroups the flame graph by leaf frames (the methods actually on-CPU/
+// allocating), then shows their callers above them — the inverse of the
+// normal top-down call tree.  Computed in a Web Worker so the UI stays
+// responsive for large profiles; result is cached for instant re-entry.
+
+let reverseMode = false;
+let reverseLevelsCache = null;
+let reverseWorker = null;
+
+// Worker source embedded as a string (single-file constraint).
+// Contains only pure computation — no DOM access.
+const REVERSE_WORKER_SRC = `'use strict';
+
+function findFrame(frames, x) {
+    let lo = 0, hi = frames.length - 1;
+    while (lo <= hi) {
+        const mid = (lo + hi) >>> 1;
+        const f = frames[mid];
+        if (f.left > x) hi = mid - 1;
+        else if (f.left + f.width <= x) lo = mid + 1;
+        else return f;
+    }
+    if (frames[lo]  && (frames[lo].left - x) < 0.5) return frames[lo];
+    if (frames[hi]  && (x - (frames[hi].left + frames[hi].width)) < 0.5) return frames[hi];
+    return null;
+}
+
+self.onmessage = function(e) {
+    const levels = e.data.levels;
+    const totalFrames = levels.reduce(function(s, lv) { return s + lv.length; }, 0);
+
+    // ── Stage 1: build parent map ─────────────────────────────────────────
+    self.postMessage({progress: 0.05, stage: 'Building parent map\u2026'});
+    const parentOf = new Map();
+    const hasChildren = new Set();
+    let done = 0;
+    for (let h = 1; h < levels.length; h++) {
+        for (const fr of levels[h]) {
+            const p = findFrame(levels[h - 1], fr.left);
+            if (p) { parentOf.set(fr, p); hasChildren.add(p); }
+        }
+        done += levels[h].length;
+        if (h % 8 === 0)
+            self.postMessage({progress: 0.05 + 0.2 * done / totalFrames, stage: 'Building parent map\u2026'});
+    }
+
+    // ── Stage 2: collect leaves ───────────────────────────────────────────
+    self.postMessage({progress: 0.27, stage: 'Finding leaves\u2026'});
+    const root = levels[0][0];
+    const leaves = [];
+    for (let h = 1; h < levels.length; h++)
+        for (const fr of levels[h])
+            if (!hasChildren.has(fr)) leaves.push(fr);
+
+    // ── Stage 3: build reverse trie ───────────────────────────────────────
+    // Each leaf contributes its width to every node on its reversed call
+    // chain: [leaf, parent, grandparent, ..., (root excluded)].
+    self.postMessage({progress: 0.32, stage: 'Building reverse tree\u2026'});
+    const trieRoot = {
+        title: root.title, width: root.width,
+        color: root.color, details: root.details || '',
+        children: new Map()
+    };
+    for (let i = 0; i < leaves.length; i++) {
+        const leaf = leaves[i];
+        // Reversed call chain for this leaf
+        const stack = [];
+        let fr = leaf;
+        while (fr && fr !== root) { stack.push(fr); fr = parentOf.get(fr); }
+
+        // Insert into trie, accumulating weight at each node
+        let node = trieRoot;
+        for (const frame of stack) {
+            let child = node.children.get(frame.title);
+            if (!child) {
+                child = {
+                    title: frame.title, width: 0,
+                    color: frame.color, details: frame.details || '',
+                    children: new Map()
+                };
+                node.children.set(frame.title, child);
+            }
+            child.width += leaf.width;
+            node = child;
+        }
+        if (i % 100 === 0)
+            self.postMessage({progress: 0.32 + 0.38 * i / leaves.length, stage: 'Building reverse tree\u2026'});
+    }
+
+    // ── Stage 4: layout trie → levels[] ──────────────────────────────────
+    // DFS: visit children (sorted widest-first), then emit parent.
+    // pos tracks the running left offset; each node's width = pos - start.
+    self.postMessage({progress: 0.72, stage: 'Computing layout\u2026'});
+    const newLevels = [];
+    let pos = 0;
+    function layout(node, depth) {
+        if (!newLevels[depth]) newLevels[depth] = [];
+        const start = pos;
+        if (node.children.size === 0) {
+            pos += node.width;
+        } else {
+            const kids = Array.from(node.children.values())
+                .sort(function(a, b) { return b.width - a.width; });
+            for (const k of kids) layout(k, depth + 1);
+        }
+        newLevels[depth].push({
+            level: depth, left: start, width: pos - start,
+            color: node.color, title: node.title, details: node.details
+        });
+    }
+    layout(trieRoot, 0);
+    for (const lv of newLevels) lv.sort(function(a, b) { return a.left - b.left; });
+
+    self.postMessage({progress: 1.0, stage: 'Done'});
+    self.postMessage({result: newLevels});
+};`;
+
+function _swapLevels(src) {
+    levels.length = 0;
+    for (const lv of src) levels.push(lv.map(fr => ({...fr})));
+}
+
+function _resetView() {
+    zoomFactor = 1; panSamples = 0;
+    pattern = undefined; nav = []; navIndex = -1; matchval = '';
+    document.getElementById('matchpct').style.display = 'none';
+    filterHistory = []; updateFilterChips();
+    stacksRemoved = false;
+    document.getElementById('restoreBtn').disabled = true;
+}
+
+function activateReverseView() {
+    reverseMode = true;
+    document.getElementById('buview').classList.add('active');
+    _swapLevels(reverseLevelsCache);
+    _resetView();
+    render(levels[0][0]);
+}
+
+function deactivateReverseView() {
+    reverseMode = false;
+    document.getElementById('buview').classList.remove('active');
+    _swapLevels(originalLevels);
+    _resetView();
+    render(levels[0][0]);
+}
+
+function computeReverseView() {
+    if (reverseLevelsCache) { activateReverseView(); return; }
+    if (reverseWorker) { reverseWorker.terminate(); reverseWorker = null; }
+
+    const progressWrap  = document.getElementById('buprogress');
+    const progressBar   = document.getElementById('bupbar');
+    const progressLabel = document.getElementById('buplabel');
+
+    // Only show the progress UI if computation takes more than 150 ms
+    const showTimer = setTimeout(function() { progressWrap.style.display = 'block'; }, 150);
+
+    const blob = new Blob([REVERSE_WORKER_SRC], {type: 'application/javascript'});
+    const url  = URL.createObjectURL(blob);
+    reverseWorker = new Worker(url);
+
+    reverseWorker.onmessage = function(e) {
+        if (e.data.result) {
+            clearTimeout(showTimer);
+            progressWrap.style.display = 'none';
+            URL.revokeObjectURL(url);
+            reverseWorker = null;
+            reverseLevelsCache = e.data.result;
+            activateReverseView();
+        } else {
+            progressBar.style.width = (e.data.progress * 100) + '%';
+            progressLabel.textContent = e.data.stage;
+        }
+    };
+
+    reverseWorker.onerror = function(err) {
+        clearTimeout(showTimer);
+        progressWrap.style.display = 'none';
+        document.getElementById('buview').classList.remove('active');
+        reverseWorker = null;
+        console.error('Bottom-up worker error:', err);
+    };
+
+    // Send a deep copy so the worker gets plain transferable objects
+    reverseWorker.postMessage({levels: originalLevels});
+}
+
+document.getElementById('buview').onclick = function() {
+    if (reverseMode) deactivateReverseView();
+    else computeReverseView();
+};
