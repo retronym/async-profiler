@@ -1054,7 +1054,7 @@ unpack(cpool);
 
 /*frames:*/
 render(levels[0][0]);
-{ const h = /*highlight:*/; if (h) { search(h); document.getElementById('searchinput').value = h; openSearch(); } }
+{ const h = /*highlight:*/null; if (h) { search(h); document.getElementById('searchinput').value = h; openSearch(); } }
 
 // Snapshot original frame data so removed stacks can be restored
 const originalLevels = levels.map(h => h.map(fr => ({...fr})));
