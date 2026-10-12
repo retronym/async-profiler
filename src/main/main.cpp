@@ -100,7 +100,8 @@ static const char USAGE_STRING[] =
     "                      from the non-privileged target\n"
     "  --kperf             (macOS) sample hardware counters via the asprof-kperf helper;\n"
     "                      implied by cycles, instructions, cache-misses, branch-misses\n"
-    "                      and kpep event names such as L1D_CACHE_MISS_LD_NONSPEC\n"
+    "                      and kpep event names such as L1D_CACHE_MISS_LD_NONSPEC.\n"
+    "                      Up to 4 events: -e cycles+cache-misses@20000\n"
     "  --target-cpu cpu    sample threads on a specific CPU (perf_events only, default: -1)\n"
     "\n"
     "<pid> is a numeric process ID of the target JVM\n"
@@ -368,18 +369,31 @@ static void run_fdtransfer(int pid, String& fdtransfer) {
 // On macOS, hardware counter events are sampled by the kernel (kperf) under the
 // control of a separate privileged helper, asprof-kperf, which streams stacks
 // to the agent over a unix socket. See research/kperf/DESIGN.md.
-static bool is_kperf_event(const char* event) {
-    if (strcmp(event, "cycles") == 0 || strcmp(event, "instructions") == 0 ||
-        strcmp(event, "cache-misses") == 0 || strcmp(event, "branch-misses") == 0) {
-        return true;
+static bool is_kperf_event_name(const char* event, size_t len) {
+    static const char* const aliases[] = {"cycles", "instructions", "cache-misses", "branch-misses"};
+    for (size_t i = 0; i < sizeof(aliases) / sizeof(aliases[0]); i++) {
+        if (strlen(aliases[i]) == len && strncmp(event, aliases[i], len) == 0) return true;
     }
     // kpep event names, e.g. L1D_CACHE_MISS_LD_NONSPEC
     bool underscore = false;
-    for (const char* p = event; *p; p++) {
-        if (*p == '_') underscore = true;
-        else if (!((*p >= 'A' && *p <= 'Z') || (*p >= '0' && *p <= '9'))) return false;
+    for (size_t i = 0; i < len; i++) {
+        char c = event[i];
+        if (c == '_') underscore = true;
+        else if (!((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9'))) return false;
     }
     return underscore;
+}
+
+// EVENT[@PERIOD][+EVENT[@PERIOD]...]
+static bool is_kperf_event(const char* event) {
+    while (true) {
+        const char* end = strchr(event, '+');
+        size_t len = end != NULL ? (size_t)(end - event) : strlen(event);
+        const char* at = (const char*)memchr(event, '@', len);
+        if (!is_kperf_event_name(event, at != NULL ? (size_t)(at - event) : len)) return false;
+        if (end == NULL) return true;
+        event = end + 1;
+    }
 }
 
 static void run_kperf(int pid) {

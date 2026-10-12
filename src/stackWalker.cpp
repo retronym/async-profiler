@@ -527,7 +527,11 @@ static const char* findNativeMethodCached(Profiler* profiler, const void* pc) {
 // `fixup` is the link register at the time of the sample: if it points outside
 // the leaf function and is not already the next frame, the leaf had not pushed
 // a frame record yet, and the fixup is its caller.
-int StackWalker::resolveRaw(const uint64_t* pcs, int num_pcs, uint64_t fixup, ASGCT_CallFrame* frames, int max_depth) {
+// `precise_pc`, if non-zero, is the PC the PMU latched at the event itself. It
+// replaces the (skidded) interrupted PC as the leaf when both are in the same
+// function; otherwise it is cleared, so the caller can tell whether it was used.
+int StackWalker::resolveRaw(const uint64_t* pcs, int num_pcs, uint64_t fixup, uint64_t* precise_pc,
+                            ASGCT_CallFrame* frames, int max_depth) {
     Profiler* profiler = Profiler::instance();
 
     jmp_buf current_ctx;
@@ -540,6 +544,25 @@ int StackWalker::resolveRaw(const uint64_t* pcs, int num_pcs, uint64_t fixup, AS
             fillFrame(frames[depth++], BCI_ERROR, "break_not_walkable");
         }
         return depth;
+    }
+
+    uint64_t leaf_pc = num_pcs > 0 ? pcs[0] : 0;
+    if (*precise_pc != 0 && num_pcs > 0 && *precise_pc != leaf_pc) {
+        const void* precise = (const void*)*precise_pc;
+        const void* leaf = (const void*)leaf_pc;
+        bool same;
+        if (CodeHeap::contains(leaf)) {
+            NMethod* nm = CodeHeap::findNMethod(leaf);
+            same = nm != NULL && !nm->isInterpreter() && nm->contains(precise);
+        } else {
+            const char* name = findNativeMethodCached(profiler, leaf);
+            same = name != NULL && name == findNativeMethodCached(profiler, precise);
+        }
+        if (same) {
+            leaf_pc = *precise_pc;
+        } else {
+            *precise_pc = 0;
+        }
     }
 
     bool use_fixup = false;
@@ -556,7 +579,7 @@ int StackWalker::resolveRaw(const uint64_t* pcs, int num_pcs, uint64_t fixup, AS
     }
 
     for (int i = 0; i < num_pcs && depth < max_depth; i++) {
-        const void* pc = (const void*)pcs[i];
+        const void* pc = (const void*)(i == 0 ? leaf_pc : pcs[i]);
         if (i == 1 && use_fixup) {
             use_fixup = false;
             pc = (const void*)fixup;

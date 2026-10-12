@@ -43,9 +43,26 @@
 #define KPERF_SAMPLER_TH_INFO       (1u << 0)
 #define KPERF_SAMPLER_USTACK        (1u << 3)
 
+// Apple silicon PMCs that latch the exact PC of the event (XNU PMC_SUPPORTS_PC_CAPTURE)
+#define PC_CAPTURE_FIRST 5
+#define PC_CAPTURE_LAST  7
+
 typedef struct kpep_db kpep_db;
 typedef struct kpep_config kpep_config;
-typedef struct kpep_event kpep_event;
+
+// Layout of kperfdata's event descriptor (stable since at least macOS 11)
+typedef struct {
+    const char* name;
+    const char* description;
+    const char* errata;
+    const char* alias;
+    const char* fallback;
+    uint32_t mask;  // counters the event may be programmed on, by absolute PMC index
+    uint8_t number;
+    uint8_t umask;
+    uint8_t reserved;
+    uint8_t is_fixed;
+} kpep_event;
 
 static int (*kpc_force_all_ctrs_set)(int);
 static int (*kpc_force_all_ctrs_get)(int*);
@@ -54,6 +71,8 @@ static int (*kpc_set_thread_counting)(uint32_t);
 static int (*kpc_set_config)(uint32_t, uint64_t*);
 static int (*kpc_set_period)(uint32_t, uint64_t*);
 static int (*kpc_set_actionid)(uint32_t, uint32_t*);
+static uint32_t (*kpc_get_counter_count)(uint32_t);
+static uint32_t (*kpc_get_config_count)(uint32_t);
 static int (*kperf_action_count_set)(uint32_t);
 static int (*kperf_action_count_get)(uint32_t*);
 static int (*kperf_action_samplers_set)(uint32_t, uint32_t);
@@ -66,9 +85,8 @@ static int (*kpep_db_event)(kpep_db*, const char*, kpep_event**);
 static int (*kpep_config_create)(kpep_db*, kpep_config**);
 static void (*kpep_config_free)(kpep_config*);
 static int (*kpep_config_force_counters)(kpep_config*);
-static int (*kpep_config_add_event_trigger)(kpep_config*, kpep_event**, uint32_t, uint64_t, uint32_t*);
+static int (*kpep_config_add_event)(kpep_config*, kpep_event**, uint32_t, uint32_t*);
 static int (*kpep_config_kpc)(kpep_config*, uint64_t*, size_t);
-static int (*kpep_config_kpc_periods)(kpep_config*, uint64_t*, size_t);
 
 #define LOAD(lib, sym) if ((*(void**)&sym = dlsym(lib, #sym)) == NULL) { fprintf(stderr, "Missing %s\n", #sym); return false; }
 
@@ -81,12 +99,13 @@ static bool loadFrameworks(void) {
     }
     LOAD(kperf, kpc_force_all_ctrs_set) LOAD(kperf, kpc_force_all_ctrs_get) LOAD(kperf, kpc_set_counting)
     LOAD(kperf, kpc_set_thread_counting) LOAD(kperf, kpc_set_config) LOAD(kperf, kpc_set_period)
-    LOAD(kperf, kpc_set_actionid) LOAD(kperf, kperf_action_count_set) LOAD(kperf, kperf_action_count_get)
+    LOAD(kperf, kpc_set_actionid) LOAD(kperf, kpc_get_counter_count) LOAD(kperf, kpc_get_config_count)
+    LOAD(kperf, kperf_action_count_set) LOAD(kperf, kperf_action_count_get)
     LOAD(kperf, kperf_action_samplers_set) LOAD(kperf, kperf_action_filter_set_by_pid)
     LOAD(kperf, kperf_sample_set) LOAD(kperf, kperf_reset)
     LOAD(kpep, kpep_db_create) LOAD(kpep, kpep_db_free) LOAD(kpep, kpep_db_event) LOAD(kpep, kpep_config_create)
-    LOAD(kpep, kpep_config_free) LOAD(kpep, kpep_config_force_counters) LOAD(kpep, kpep_config_add_event_trigger)
-    LOAD(kpep, kpep_config_kpc) LOAD(kpep, kpep_config_kpc_periods)
+    LOAD(kpep, kpep_config_free) LOAD(kpep, kpep_config_force_counters) LOAD(kpep, kpep_config_add_event)
+    LOAD(kpep, kpep_config_kpc)
     return true;
 }
 
@@ -106,13 +125,20 @@ typedef struct {
     unsigned int value1, value2, value3, value4;
 } kd_regtype;
 
-#define KDBG_CLASSTYPE 0x10000
-#define DBG_PERF       37
+#define KDBG_CLASSTYPE  0x10000
+#define DBG_PERF        37
 #define KDBG_EVENTID(c, s, code) (((uint32_t)(c) << 24) | ((uint32_t)(s) << 16) | ((uint32_t)(code) << 2))
-#define DEBUGID_MASK   (~3u)
-#define PERF_CS_UDATA  KDBG_EVENTID(DBG_PERF, 2, 4)
-#define PERF_CS_UHDR   KDBG_EVENTID(DBG_PERF, 2, 6)
+#define DEBUGID_MASK    (~3u)
+#define DBG_FUNC_START  1u
+#define PERF_GEN_EVENT  KDBG_EVENTID(DBG_PERF, 0, 0)
+#define PERF_CS_UDATA   KDBG_EVENTID(DBG_PERF, 2, 4)
+#define PERF_CS_UHDR    KDBG_EVENTID(DBG_PERF, 2, 6)
+#define PERF_KPC_HNDLR  KDBG_EVENTID(DBG_PERF, 6, 0)
 #define CALLSTACK_VALID (1u << 0)
+#define SAMPLE_FLAG_PEND_USER (1u << 0)
+#define KPC_DESC_COUNTER(desc) (((desc) >> 32) & 0xffff)
+#define KPC_DESC_FLAGS(desc)   ((desc) >> 48)
+#define KPC_CAPTURED_PC        0x08
 
 static int kdCtl(int op, int arg, void* buf, size_t* len) {
     int mib[4] = {CTL_KERN, KERN_KDEBUG, op, arg};
@@ -135,6 +161,40 @@ static void kdebugTeardown(void) {
     kdCtl(KERN_KDREMOVE, -1, NULL, &z);
 }
 
+// --------------------------------------------------------- exclusivity
+
+enum { KTRACE_STATE_OFF = 0, KTRACE_STATE_FG = 1, KTRACE_STATE_BG = 2 };
+
+// The kernel arbitrates ktrace (kdebug + kperf) ownership and the forcing of
+// all PMCs, but reports conflicts only as EBUSY/EACCES from whichever call
+// hits them first. Check up front and say who holds what.
+static bool checkExclusive(char* msg, size_t msglen) {
+    int forced = 0;
+    if (kpc_force_all_ctrs_get(&forced) == 0 && forced) {
+        snprintf(msg, msglen, "PMU counters are reserved by another process (Instruments, xctrace or another profiler?)");
+        return false;
+    }
+
+    int state = 0, owner = 0;
+    size_t len = sizeof(state);
+    sysctlbyname("ktrace.state", &state, &len, NULL, 0);
+    len = sizeof(owner);
+    sysctlbyname("ktrace.owning_pid", &owner, &len, NULL, 0);
+    char by[64] = "";
+    len = sizeof(by);
+    sysctlbyname("ktrace.configured_by", by, &len, NULL, 0);
+
+    if (state == KTRACE_STATE_FG && owner != 0 && owner != getpid() && kill(owner, 0) == 0) {
+        snprintf(msg, msglen, "Kernel tracing is in use by %s (pid %d)", by[0] ? by : "another process", owner);
+        return false;
+    }
+    if (state == KTRACE_STATE_BG) {
+        // e.g. tailspind: taking over is allowed and it is notified when we reset
+        fprintf(stderr, "asprof-kperf: taking over kernel tracing from background tool %s\n", by);
+    }
+    return true;
+}
+
 // ------------------------------------------------------------ PMU setup
 
 static void resetCounters(void) {
@@ -150,34 +210,103 @@ static void resetCounters(void) {
     kpc_force_all_ctrs_set(0);
 }
 
-// Programs one configurable counter to raise a PMI every `period` events,
-// bound to kperf action 1 which samples the user stack of `pid`.
-static int startSampling(pid_t pid, const char* event, uint64_t period, char* msg, size_t msglen) {
-    kpep_db* db = NULL;
-    kpep_config* cfg = NULL;
+// Absolute PMC -> index into the request's events, or -1
+static int counter_event[KPC_MAX_COUNTERS];
+
+// Looks up the event's counter mask and its counter-independent config word.
+static bool eventConfig(kpep_db* db, const char* name, uint32_t* mask, uint64_t* config) {
     kpep_event* ev = NULL;
+    kpep_config* cfg = NULL;
+    uint64_t regs[KPC_MAX_COUNTERS] = {0};
+    uint32_t err = 0;
+    bool ok = kpep_db_event(db, name, &ev) == 0 &&
+              kpep_config_create(db, &cfg) == 0 &&
+              kpep_config_force_counters(cfg) == 0 &&
+              kpep_config_add_event(cfg, &ev, 0, &err) == 0 &&
+              kpep_config_kpc(cfg, regs, sizeof(regs)) == 0;
+    if (cfg != NULL) kpep_config_free(cfg);
+    if (!ok || ev->is_fixed || regs[0] == 0) return false;
+    *mask = ev->mask;
+    *config = regs[0];
+    return true;
+}
+
+// Programs one configurable PMC per event to raise a PMI every `period` events,
+// all bound to kperf action 1 which samples the user stack of `pid`. Events go
+// on the PC-capturing PMCs first, unless the request opts out.
+static int startSampling(pid_t pid, const struct KperfRequest* req, struct KperfResponse* resp) {
+    char* msg = resp->message;
+    size_t msglen = sizeof(resp->message);
+    kpep_db* db = NULL;
     uint64_t regs[KPC_MAX_COUNTERS] = {0};
     uint64_t periods[KPC_MAX_COUNTERS] = {0};
     uint32_t actions[KPC_MAX_COUNTERS] = {0};
-    uint32_t err = 0;
     int r = EINVAL;
 
-    if (kpep_db_create(NULL, &db) || kpep_config_create(db, &cfg) || kpep_config_force_counters(cfg)) {
+    if (req->num_events == 0 || req->num_events > KPERF_MAX_EVENTS) {
+        snprintf(msg, msglen, "Between 1 and %d events are supported", KPERF_MAX_EVENTS);
+        return EINVAL;
+    }
+    if (!checkExclusive(msg, msglen)) {
+        return EBUSY;
+    }
+    if (kpep_db_create(NULL, &db)) {
         snprintf(msg, msglen, "Cannot load PMU event database");
+        return EINVAL;
+    }
+
+    // Counters are only all available once forced
+    if (kpc_force_all_ctrs_set(1)) {
+        r = errno ? errno : EACCES;
+        snprintf(msg, msglen, "Cannot reserve PMU counters: %s", strerror(r));
         goto out;
     }
-    if (kpep_db_event(db, event, &ev)) {
-        snprintf(msg, msglen, "Unknown PMU event %s", event);
+    uint32_t nfixed = kpc_get_counter_count(KPC_CLASS_FIXED_MASK);
+    uint32_t nconfig = kpc_get_config_count(KPC_CLASS_CONFIGURABLE_MASK);
+    if (nconfig == 0 || nfixed + nconfig > KPC_MAX_COUNTERS) {
+        snprintf(msg, msglen, "Unexpected PMU layout: %u fixed, %u configurable", nfixed, nconfig);
         goto out;
     }
-    if (kpep_config_add_event_trigger(cfg, &ev, 0, period, &err) ||
-        kpep_config_kpc(cfg, regs, sizeof(regs)) ||
-        kpep_config_kpc_periods(cfg, periods, sizeof(periods))) {
-        snprintf(msg, msglen, "Cannot configure PMU event %s", event);
-        goto out;
+
+    uint32_t masks[KPERF_MAX_EVENTS];
+    uint64_t configs[KPERF_MAX_EVENTS];
+    for (uint32_t i = 0; i < req->num_events; i++) {
+        if (!eventConfig(db, req->events[i].name, &masks[i], &configs[i])) {
+            snprintf(msg, msglen, "Unknown or fixed-counter-only PMU event %s", req->events[i].name);
+            goto out;
+        }
+        if (req->events[i].period == 0) {
+            snprintf(msg, msglen, "Zero period for %s", req->events[i].name);
+            goto out;
+        }
     }
-    for (int i = 0; i < KPC_MAX_COUNTERS; i++) {
-        actions[i] = periods[i] != 0 ? 1 : 0;
+
+    // Assign absolute PMCs: PC-capturing ones first, then any other allowed counter
+    for (int c = 0; c < KPC_MAX_COUNTERS; c++) counter_event[c] = -1;
+    uint32_t used = 0;
+    bool prefer_capture = !(req->flags & KPERF_REQ_NO_PC_CAPTURE);
+    for (int pass = prefer_capture ? 0 : 1; pass < 2; pass++) {
+        for (uint32_t i = 0; i < req->num_events; i++) {
+            if (resp->counter[i] != 0) continue;
+            for (uint32_t c = nfixed; c < nfixed + nconfig; c++) {
+                bool capture = c >= PC_CAPTURE_FIRST && c <= PC_CAPTURE_LAST;
+                if ((pass == 0 && !capture) || (used & (1u << c)) || !(masks[i] & (1u << c))) continue;
+                used |= 1u << c;
+                resp->counter[i] = (uint8_t)c;
+                resp->pc_capture[i] = capture;
+                counter_event[c] = (int)i;
+                regs[c - nfixed] = configs[i];
+                periods[c - nfixed] = req->events[i].period;
+                actions[c - nfixed] = 1;
+                break;
+            }
+        }
+    }
+    for (uint32_t i = 0; i < req->num_events; i++) {
+        if (resp->counter[i] == 0) {
+            snprintf(msg, msglen, "No free counter for %s", req->events[i].name);
+            goto out;
+        }
     }
 
     // kperf cannot shrink its action array, and other clients may have grown it
@@ -186,8 +315,7 @@ static int startSampling(pid_t pid, const char* event, uint64_t period, char* ms
     kperf_reset();
     kperf_action_count_get(&nactions);
 
-    if (kpc_force_all_ctrs_set(1) ||
-        kpc_set_config(KPC_CLASS_CONFIGURABLE_MASK, regs) ||
+    if (kpc_set_config(KPC_CLASS_CONFIGURABLE_MASK, regs) ||
         kpc_set_period(KPC_CLASS_CONFIGURABLE_MASK, periods) ||
         kpc_set_actionid(KPC_CLASS_CONFIGURABLE_MASK, actions) ||
         kperf_action_count_set(nactions > 1 ? nactions : 1) ||
@@ -199,7 +327,7 @@ static int startSampling(pid_t pid, const char* event, uint64_t period, char* ms
     }
     if (kdebugSetup(1 << 20)) {
         r = errno ? errno : EBUSY;
-        snprintf(msg, msglen, "Cannot set up kdebug (Instruments or ktrace running?): %s", strerror(r));
+        snprintf(msg, msglen, "Cannot set up kdebug: %s", strerror(r));
         goto out;
     }
     if (kperf_sample_set(1) || kpc_set_counting(KPC_CLASS_FIXED_MASK | KPC_CLASS_CONFIGURABLE_MASK)) {
@@ -210,8 +338,7 @@ static int startSampling(pid_t pid, const char* event, uint64_t period, char* ms
     r = 0;
 
 out:
-    if (cfg != NULL) kpep_config_free(cfg);
-    if (db != NULL) kpep_db_free(db);
+    kpep_db_free(db);
     if (r != 0) {
         kdebugTeardown();
         resetCounters();
@@ -221,8 +348,12 @@ out:
 
 // --------------------------------------------------------------- serving
 
+// Per-thread state: the PMIs of our pid since the last stack, and the stack being assembled
 typedef struct {
     uint64_t tid;
+    uint32_t pmis;
+    int event;
+    uint64_t precise_pc;
     uint64_t timestamp;
     uint32_t expect;
     uint32_t have;
@@ -230,13 +361,26 @@ typedef struct {
     uint64_t frames[KPERF_MAX_FRAMES + 1];
 } Pending;
 
+// Per-CPU: the last PMI taken, until kperf confirms it passed the pid filter
+typedef struct {
+    uint64_t tid;
+    uint64_t desc;
+    uint64_t pc;
+} CpuPmi;
+
 #define MAX_PENDING 1024
+#define MAX_CPUS    256
 static Pending pending[MAX_PENDING];
 static int num_pending;
+static CpuPmi cpu_pmi[MAX_CPUS];
 
 static char outbuf[1 << 20];
 static size_t outlen;
 static int client_fd = -1;
+
+static struct {
+    uint64_t pmis, stacks, precise, unattributed;
+} stats;
 
 static bool flushOut(void) {
     size_t off = 0;
@@ -257,12 +401,29 @@ static bool emit(Pending* p) {
     // callstack_fixup_user(); send it separately.
     uint32_t n = p->expect > 0 ? p->expect - 1 : 0;
     if (n > KPERF_MAX_FRAMES) n = KPERF_MAX_FRAMES;
-    struct KperfSample s = {p->timestamp, p->tid, p->expect > 0 ? p->frames[p->expect - 1] : 0, p->flags, n};
+    struct KperfSample s = {0};
+    s.timestamp = p->timestamp;
+    s.thread_id = p->tid;
+    s.fixup = p->expect > 0 ? p->frames[p->expect - 1] : 0;
+    s.precise_pc = p->precise_pc;
+    s.flags = p->flags;
+    s.event = p->event >= 0 ? (uint16_t)p->event : 0;
+    s.weight = p->pmis > 0 ? (p->pmis > 0xffff ? 0xffff : (uint16_t)p->pmis) : 1;
+    s.num_frames = n;
+
+    stats.stacks++;
+    if (p->precise_pc) stats.precise++;
+    if (p->pmis == 0) stats.unattributed++;
+
     size_t need = sizeof(s) + n * sizeof(uint64_t);
     if (outlen + need > sizeof(outbuf) && !flushOut()) return false;
     memcpy(outbuf + outlen, &s, sizeof(s));
     memcpy(outbuf + outlen + sizeof(s), p->frames, n * sizeof(uint64_t));
     outlen += need;
+
+    p->pmis = 0;
+    p->event = -1;
+    p->precise_pc = 0;
     return true;
 }
 
@@ -274,12 +435,30 @@ static Pending* pendingFor(uint64_t tid) {
     Pending* p = &pending[num_pending++];
     memset(p, 0, sizeof(*p));
     p->tid = tid;
+    p->event = -1;
     return p;
 }
 
 static bool handleEvent(const kd_buf* e) {
     uint32_t id = e->debugid & DEBUGID_MASK;
-    if (id == PERF_CS_UHDR) {
+    if (id == PERF_KPC_HNDLR && (e->debugid & DBG_FUNC_START)) {
+        // PMI on any process: desc, counter value, PC (precise if captured)
+        if (e->cpuid < MAX_CPUS) {
+            cpu_pmi[e->cpuid] = (CpuPmi){e->arg5, e->arg1, e->arg3};
+        }
+    } else if (id == PERF_GEN_EVENT && (e->debugid & DBG_FUNC_START) && (e->arg4 & SAMPLE_FLAG_PEND_USER)) {
+        // kperf sampled in interrupt context: the PMI passed the pid filter
+        if (e->cpuid < MAX_CPUS && cpu_pmi[e->cpuid].tid == e->arg5 && cpu_pmi[e->cpuid].desc != 0) {
+            CpuPmi* pmi = &cpu_pmi[e->cpuid];
+            Pending* p = pendingFor(e->arg5);
+            uint32_t ctr = (uint32_t)KPC_DESC_COUNTER(pmi->desc);
+            p->pmis++;
+            p->event = ctr < KPC_MAX_COUNTERS ? counter_event[ctr] : -1;
+            p->precise_pc = (KPC_DESC_FLAGS(pmi->desc) & KPC_CAPTURED_PC) ? pmi->pc : 0;
+            pmi->desc = 0;
+            stats.pmis++;
+        }
+    } else if (id == PERF_CS_UHDR) {
         Pending* p = pendingFor(e->arg5);
         p->flags = (uint32_t)e->arg1;
         p->expect = (p->flags & CALLSTACK_VALID) ? (uint32_t)e->arg2 : 0;
@@ -350,23 +529,33 @@ static void serveClient(pid_t expected_pid) {
 
     struct KperfRequest req;
     if (!readFully(client_fd, &req, sizeof(req)) || req.magic != KPERF_MAGIC) {
-        fprintf(stderr, "Bad request from pid %d\n", pid);
+        fprintf(stderr, "Bad request from pid %d (agent and helper versions differ?)\n", pid);
         return;
     }
-    req.event[KPERF_EVENT_LEN - 1] = 0;
+    for (uint32_t i = 0; i < KPERF_MAX_EVENTS; i++) req.events[i].name[KPERF_EVENT_LEN - 1] = 0;
 
-    struct KperfResponse resp = {KPERF_MAGIC, 0, ""};
-    resp.error = startSampling(pid, req.event, req.period, resp.message, sizeof(resp.message));
+    struct KperfResponse resp;
+    memset(&resp, 0, sizeof(resp));
+    resp.magic = KPERF_MAGIC;
+    resp.error = startSampling(pid, &req, &resp);
     if (write(client_fd, &resp, sizeof(resp)) != sizeof(resp) || resp.error != 0) {
         if (resp.error) fprintf(stderr, "pid %d: %s\n", pid, resp.message);
-        if (resp.error == 0) { kdebugTeardown(); resetCounters(); }
+        else { kdebugTeardown(); resetCounters(); }
         return;
     }
-    if (verbose) fprintf(stderr, "Sampling pid %d: %s every %llu\n", pid, req.event, (unsigned long long)req.period);
+    if (verbose) {
+        fprintf(stderr, "Sampling pid %d:", pid);
+        for (uint32_t i = 0; i < req.num_events; i++) {
+            fprintf(stderr, " %s/%llu on PMC%u%s", req.events[i].name, (unsigned long long)req.events[i].period,
+                    resp.counter[i], resp.pc_capture[i] ? " (precise PC)" : "");
+        }
+        fprintf(stderr, "\n");
+    }
 
     size_t bufcount = 1 << 16;
     kd_buf* buf = malloc(bufcount * sizeof(kd_buf));
-    uint64_t samples_before = 0;
+    memset(&stats, 0, sizeof(stats));
+    memset(cpu_pmi, 0, sizeof(cpu_pmi));
     num_pending = 0;
     outlen = 0;
     while (!terminated && !clientClosed()) {
@@ -381,13 +570,16 @@ static void serveClient(pid_t expected_pid) {
             ok = handleEvent(&buf[i]);
         }
         if (!ok || !flushOut()) break;
-        samples_before += n;
         if (n < bufcount / 2) usleep(5000);
     }
     free(buf);
     kdebugTeardown();
     resetCounters();
-    if (verbose) fprintf(stderr, "Stopped sampling pid %d (%llu trace events)\n", pid, (unsigned long long)samples_before);
+    if (verbose) {
+        fprintf(stderr, "Stopped sampling pid %d: %llu PMIs, %llu stacks, %llu with precise PC, %llu unattributed\n",
+                pid, (unsigned long long)stats.pmis, (unsigned long long)stats.stacks,
+                (unsigned long long)stats.precise, (unsigned long long)stats.unattributed);
+    }
 }
 
 // Waits for a connection for at most timeout_ms; returns -1 on timeout or error

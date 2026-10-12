@@ -75,7 +75,7 @@ Results (agent started at JVM launch, so setup is included):
 **Platform and privileges**
 
 - **Root is required.** The PMU interfaces are private frameworks, and the entitlement that would avoid root is Apple-only. Function signatures and struct layouts can change in any macOS update.
-- **One owner at a time.** The counters, kperf and the kernel trace buffer are global. Each new session starts by clearing the trace buffer, so it silently clobbers whatever else is using them: Instruments/xctrace, `ktrace`, or a second `asprof` / helper.
+- **One owner at a time.** The counters, kperf and the kernel trace buffer are global. The kernel arbitrates: a live foreground ktrace owner makes others fail with `EBUSY`, and forced counters held by another task give `EACCES`. The helper checks this up front and names the owner. A *background* tool (`tailspind`) is taken over, as Instruments does; it is notified when we reset. Counter config writes only need root, so another root process could still reprogram counters mid-session.
 - **Tested only on an M5 Pro with macOS 27.** Intel Macs use the same API but are untested. The event aliases (`cache-misses` → `L1D_CACHE_MISS_LD_NONSPEC`, etc.) are Apple-silicon names. Counters don't work inside VMs.
 
 **Stack quality**
@@ -95,26 +95,45 @@ Results (agent started at JVM launch, so setup is included):
 
 **Scope**
 
-- **One event per session.**
-- **Samples are recorded as `PERF_SAMPLE`,** so JFR doesn't carry the event name.
+- **Samples are recorded as `PERF_SAMPLE`,** so JFR doesn't carry the event name. With several events, each stack gets a root pseudo-frame (`[cycles]`, …) so their profiles do not merge; that frame is also all JFR consumers see.
 - **The interrupt fires on every process.** The pid filter is applied after the interrupt, so a small period costs kernel time across the whole system.
 - **The one-shot helper (`-p <pid>`) gives up after 30s** if the agent hasn't connected.
 - **No automated tests.** `run.sh` and `spike.sh` are manual, root-only integration tests.
 
 ## Precise PC capture
 
-Apple silicon can record the exact instruction address that caused a counter event. This machine reports `kpc.pc_capture_supported: 1`. XNU's own test for it, `pmi_pc_capture` in `tests/cpu_counters/kpc_tests.c`, says it only works on configurable counters 5, 6 and 7. When it works, the interrupt's trace event (`PERF_KPC_HNDLR`) has the "PC captured" flag (`0x08` in `desc >> 48`) set and carries the exact PC.
+Apple silicon can record the exact instruction address that caused a counter event. This machine reports `kpc.pc_capture_supported: 1`. XNU's arm64 PMI handler (`PMC_SUPPORTS_PC_CAPTURE` in `osfmk/arm64/kpc.c`) only reads the capture register for absolute PMCs 5–7, and only uses it if the register says it latched that PMC. The PC then arrives in `PERF_KPC_HNDLR` with flag `0x08` in `desc >> 48`.
 
-Our runs reported 0 captured PCs because kpep put the event on counter 0. With a precise PC as the leaf frame, cache-miss and branch-miss profiles would point at the actual load or branch instead of a skidded one. This is presumably what Instruments' "L1D Miss Sampling" guided mode uses.
+The helper allocates counters itself rather than via kpep's allocator: each event's allowed counters (`kpep_event.mask`, by absolute PMC) and counter-independent config word come from kpep, and events go on PMCs 5–7 first. `PERF_KPC_HNDLR` is emitted before the pid filter, so the helper keeps the last PMI per CPU and attributes it to our pid when kperf's interrupt-time `PERF_GEN_EVENT` (with `SAMPLE_FLAG_PEND_USER`) follows on the same CPU and thread. That also yields the event index and how many PMIs coalesced into one stack (the sample weight). The agent uses the precise PC as the leaf when it lies in the same function as the interrupted PC.
 
-To get there, steer the event onto counters 5–7. The XNU test programs the same event on every configurable counter, then gives only counters 5–7 an interrupt period and a kperf action. There's one capture register, so it staggers periods across counters to stop them overwriting each other's PCs. Not every event may be allowed on those counters.
+Results (`spike2.sh`):
+
+- `L1D_CACHE_MISS_LD_NONSPEC` on PMC5: 24271/24271 stacks had a precise PC; 99.3% were used as the leaf (the rest fell outside the leaf function). On PMC2 (capture disabled): 0.
+- `CORE_ACTIVE_CYCLE` on PMC5: 0/90017. **Capture depends on the event, not just the counter**; it works for the load-miss event. `INST_ALL` was only tested alongside other events, so it is unknown.
+- In a three-event session (PMC5/6/7) the precise count (24187) matched the cache-miss samples (24194), consistent with the above rather than with the single capture register being clobbered.
+
+Attribution of L1D load misses, by leaf:
+
+| leaf | skid (PMC2) | precise (PMC5) |
+|---|---|---|
+| `Workload.step` (inlined load) | 31.4% | 35.3% |
+| `Workload.main` (setup shuffle) | 13.4% | 27.6% |
+| `Workload.chase` | 8.7% | 4.9% |
+| `AtomicLong.compareAndSet` + `Random.nextInt`/`next` | 14.6% | ~0.1% |
+
+The shuffle in `main` misses on its `next[j]` loads; with skid, ~15% of misses land in the `Random` code it calls next. Precise PCs put them back on the loads, and move misses from the `chase` loop onto the inlined `step` load.
+
+## Multiple events and exclusivity
+
+- `-e cycles+cache-misses+instructions` (up to 4, optional `@period` each) runs in one session on separate PMCs; the stack root carries the event name. The per-event profiles match the single-event runs.
+- A second `asprof -e cycles` while the helper server was sampling another JVM failed cleanly: `asprof-kperf: PMU counters are reserved by another process (Instruments, xctrace or another profiler?)`, exit status 200.
 
 ## Future work
 
-1. **Precise PC capture**, as above. Pass the captured PC through the protocol and use it as the leaf frame.
-2. **A helper exclusivity check.** Refuse, rather than clobber, when the counters or trace buffer are already in use.
+1. ~~Precise PC capture~~ (done). Remaining: find which events support capture (probe each kpep event on PMC5), only prefer PMCs 5–7 for those, and report per-event capture rates.
+2. ~~Helper exclusivity check~~ (done).
 3. **`benchLabAsync` hook** (scala3 bench-lab). Add `ASYNC_PROFILER_KPERF` support so JMH forks can use a long-running helper (`sudo asprof-kperf -s /tmp/asprof-kperf.sock` plus `-prof "async:libPath=…;event=…;rawCommand=kperf=/tmp/asprof-kperf.sock"`) without fighting sbt's `;` splitting.
-4. **Multiple events per session.** Use one kperf action per counter; the interrupt's trace event already says which counter fired. Pairs like cycles with misses would give per-stack ratios.
+4. ~~Multiple events per session~~ (done). Remaining: a proper JFR event carrying the event name instead of a root pseudo-frame, and per-stack ratios (e.g. misses per kilo-instruction) in the converter.
 5. **Use kernel timestamps,** converted to async-profiler's clock.
 6. **Verify the method at resolve time,** e.g. check it is still live at the sample's timestamp, or track compiled-method load and unload events.
 7. **Cheaper thread-id mapping.** Look up only the missing thread instead of re-listing all of them.

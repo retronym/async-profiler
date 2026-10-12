@@ -10,6 +10,7 @@
 
 #include <pthread.h>
 #include "engine.h"
+#include "kperfProtocol.h"
 
 // Hardware counter sampling on macOS. PMU interrupts and user stack capture are
 // done by the kernel via kperf, driven by the privileged asprof-kperf helper,
@@ -19,10 +20,14 @@ class KperfEvents : public Engine {
   private:
     static int _fd;
     static pthread_t _thread;
-    static long _interval;
     static int _max_depth;
-    static const char* _event;
+    static int _num_events;
+    static u64 _periods[KPERF_MAX_EVENTS];
+    static char _names[KPERF_MAX_EVENTS][KPERF_EVENT_LEN];  // as requested, e.g. cache-misses
+    static char _title[KPERF_MAX_EVENTS * KPERF_EVENT_LEN];
     static char _error[160];
+
+    static Error parseEvents(const char* spec, long interval, KperfRequest& req);
 
     static void* threadEntry(void* arg);
     static void readLoop();
@@ -33,7 +38,7 @@ class KperfEvents : public Engine {
     }
 
     const char* title() {
-        return _event;
+        return _title;
     }
 
     const char* units() {

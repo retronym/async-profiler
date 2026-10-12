@@ -13,7 +13,6 @@
 #include <unistd.h>
 #include <map>
 #include "kperfEvents.h"
-#include "kperfProtocol.h"
 #include "log.h"
 #include "profiler.h"
 #include "stackWalker.h"
@@ -22,9 +21,11 @@
 
 int KperfEvents::_fd = -1;
 pthread_t KperfEvents::_thread;
-long KperfEvents::_interval;
 int KperfEvents::_max_depth;
-const char* KperfEvents::_event;
+int KperfEvents::_num_events;
+u64 KperfEvents::_periods[KPERF_MAX_EVENTS];
+char KperfEvents::_names[KPERF_MAX_EVENTS][KPERF_EVENT_LEN];
+char KperfEvents::_title[KPERF_MAX_EVENTS * KPERF_EVENT_LEN];
 char KperfEvents::_error[160];
 
 struct KperfEventAlias {
@@ -94,21 +95,79 @@ static bool readFully(int fd, void* buf, size_t len) {
     return true;
 }
 
+// spec: EVENT[@PERIOD][+EVENT[@PERIOD]...], where EVENT is an alias or a kpep name.
+// `interval` (-i) applies to a single event without an explicit period.
+Error KperfEvents::parseEvents(const char* spec, long interval, KperfRequest& req) {
+    char buf[KPERF_MAX_EVENTS * KPERF_EVENT_LEN];
+    if (strlen(spec) >= sizeof(buf)) {
+        return Error("kperf event list is too long");
+    }
+    strcpy(buf, spec);
+
+    _num_events = 0;
+    _title[0] = 0;
+    char* save = NULL;
+    for (char* tok = strtok_r(buf, "+", &save); tok != NULL; tok = strtok_r(NULL, "+", &save)) {
+        if (_num_events == KPERF_MAX_EVENTS) {
+            return Error("Too many kperf events");
+        }
+        long period = 0;
+        char* at = strchr(tok, '@');
+        if (at != NULL) {
+            *at = 0;
+            period = atol(at + 1);
+            if (period <= 0) return Error("Invalid kperf event period");
+        }
+        if (strlen(tok) == 0 || strlen(tok) >= KPERF_EVENT_LEN) {
+            return Error("Invalid kperf event name");
+        }
+
+        const char* name = tok;
+        long default_interval = 1000000;
+        for (size_t i = 0; i < sizeof(kperf_aliases) / sizeof(kperf_aliases[0]); i++) {
+            if (strcmp(tok, kperf_aliases[i].alias) == 0) {
+                name = kperf_aliases[i].name;
+                default_interval = kperf_aliases[i].default_interval;
+                break;
+            }
+        }
+
+        int i = _num_events++;
+        strcpy(_names[i], tok);
+        strncpy(req.events[i].name, name, KPERF_EVENT_LEN - 1);
+        _periods[i] = period > 0 ? period : default_interval;
+        req.events[i].period = _periods[i];
+
+        if (i > 0) strcat(_title, "+");
+        strcat(_title, tok);
+    }
+
+    if (_num_events == 0) {
+        return Error("No kperf events specified");
+    }
+    if (_num_events == 1 && strchr(spec, '@') == NULL && interval > 0) {
+        _periods[0] = req.events[0].period = interval;
+    }
+    req.num_events = _num_events;
+    return Error::OK;
+}
+
 Error KperfEvents::start(Arguments& args) {
     if (args._kperf_path == NULL) {
         return Error("kperf helper socket is not specified");
     }
 
-    _event = args._event;
-    _interval = args._interval;
-    for (size_t i = 0; i < sizeof(kperf_aliases) / sizeof(kperf_aliases[0]); i++) {
-        if (strcmp(_event, kperf_aliases[i].alias) == 0) {
-            _event = kperf_aliases[i].name;
-            if (_interval <= 0) _interval = kperf_aliases[i].default_interval;
-            break;
-        }
+    KperfRequest req;
+    memset(&req, 0, sizeof(req));
+    req.magic = KPERF_MAGIC;
+    if (getenv("KPERF_NO_PC_CAPTURE") != NULL) {
+        // Spike-only switch, to compare against skidded attribution
+        req.flags |= KPERF_REQ_NO_PC_CAPTURE;
     }
-    if (_interval <= 0) _interval = 1000000;
+    Error error = parseEvents(args._event, args._interval, req);
+    if (error) {
+        return error;
+    }
     _max_depth = args._jstackdepth;
 
     struct sockaddr_un sun = {0};
@@ -125,18 +184,20 @@ Error KperfEvents::start(Arguments& args) {
         return Error(_error);
     }
 
-    KperfRequest req = {KPERF_MAGIC, 0, (uint64_t)_interval, ""};
-    strncpy(req.event, _event, sizeof(req.event) - 1);
     KperfResponse resp;
     if (write(_fd, &req, sizeof(req)) != sizeof(req) || !readFully(_fd, &resp, sizeof(resp)) || resp.magic != KPERF_MAGIC) {
         stop();
-        return Error("Bad response from asprof-kperf");
+        return Error("Bad response from asprof-kperf (agent and helper versions differ?)");
     }
     if (resp.error != 0) {
         resp.message[sizeof(resp.message) - 1] = 0;
         snprintf(_error, sizeof(_error), "asprof-kperf: %s", resp.message);
         stop();
         return Error(_error);
+    }
+    for (int i = 0; i < _num_events; i++) {
+        Log::info("kperf: %s (%s) every %llu on PMC%d%s", _names[i], req.events[i].name,
+                  (unsigned long long)_periods[i], resp.counter[i], resp.pc_capture[i] ? ", precise PC" : "");
     }
 
     if (pthread_create(&_thread, NULL, threadEntry, NULL) != 0) {
@@ -170,7 +231,7 @@ void KperfEvents::readLoop() {
     uint64_t pcs[KPERF_MAX_FRAMES];
     int max_frames = _max_depth + KPERF_MAX_FRAMES + 8;
     ASGCT_CallFrame* frames = (ASGCT_CallFrame*)calloc(max_frames, sizeof(ASGCT_CallFrame));
-    u64 samples = 0;
+    u64 samples = 0, with_pc = 0, used_pc = 0;
 
     KperfSample s;
     while (readFully(_fd, &s, sizeof(s))) {
@@ -181,15 +242,28 @@ void KperfEvents::readLoop() {
             continue;
         }
 
-        int num_frames = StackWalker::resolveRaw(pcs, s.num_frames, s.fixup, frames, max_frames - 8);
+        uint64_t precise_pc = s.precise_pc;
+        int num_frames = StackWalker::resolveRaw(pcs, s.num_frames, s.fixup, &precise_pc, frames, max_frames - 8);
+        if (s.precise_pc != 0) with_pc++;
+        if (precise_pc != 0) used_pc++;
+
+        int event = s.event < _num_events ? s.event : 0;
+        if (_num_events > 1) {
+            // Root pseudo-frame, so profiles of different events do not merge
+            frames[num_frames].bci = BCI_NATIVE_FRAME;
+            frames[num_frames].method_id = (jmethodID)_names[event];
+            num_frames++;
+        }
+
         int tid = tids.lookup(s.thread_id);
-        ExecutionEvent event(TSC::ticks());
-        profiler->recordExternalSample(_interval, tid, PERF_SAMPLE, &event, num_frames, frames);
+        ExecutionEvent ev(TSC::ticks());
+        profiler->recordExternalSample(_periods[event] * s.weight, tid, PERF_SAMPLE, &ev, num_frames, frames);
         samples++;
     }
 
     free(frames);
-    Log::debug("kperf reader stopped after %llu samples", (unsigned long long)samples);
+    Log::info("kperf: %llu samples, %llu with precise PC, %llu used as leaf", (unsigned long long)samples,
+              (unsigned long long)with_pc, (unsigned long long)used_pc);
 }
 
 #endif // __APPLE__
