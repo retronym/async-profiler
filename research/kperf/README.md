@@ -53,3 +53,19 @@ Miss counts for `chase` and `scan` are ≈1:1, as expected (2M dependent misses 
 - Use the fixup LR when the PC is in a frameless JIT leaf.
 - Steer the event onto PMC 5–7 to get precise PC capture for the leaf frame.
 - Multiple events per run (one action per counter; the PMI event carries the counter index).
+
+## Spike: helper + agent engine (see DESIGN.md)
+
+`build/bin/asprof-kperf` (src/kperf/kperfHelper.c) plus the `KperfEvents` engine (src/kperfEvents.cpp) and `StackWalker::resolveRaw`. Manual integration test: `research/kperf/spike.sh`, which starts the helper under sudo and runs `Workload` with `-agentpath:...=start,event=<ev>,kperf=/tmp/asprof-kperf.sock`.
+
+Results (agent started at JVM launch, so setup is included):
+
+| leaf | `cycles` | `instructions` | `cache-misses` |
+|---|---|---|---|
+| `step` (inlined into `chase`) + `chase` | 68% | ~3% | 42% |
+| `mix` | 13% | 27% | — |
+| `scan` | 5% | 46% | 32% |
+
+- Inlined frames resolve: the top miss stack is `…call_stub;[interpreted];Workload.chase;Workload.step`.
+- The reader thread samples itself. The first cut cost 15% of L1D misses, because `findNativeMethod` scans every loaded library per frame. A direct-mapped native PC cache brought it to 0.19% (0.08% of cycles).
+- One helper served three successive JVMs.
