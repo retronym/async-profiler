@@ -165,6 +165,10 @@ Error KperfEvents::start(Arguments& args) {
         // Spike-only switch, to compare against skidded attribution
         req.flags |= KPERF_REQ_NO_PC_CAPTURE;
     }
+    if (getenv("KPERF_KERNEL") != NULL) {
+        // Spike-only switch: count kernel mode too (see KPERF_REQ_KERNEL_COUNTING)
+        req.flags |= KPERF_REQ_KERNEL_COUNTING;
+    }
     Error error = parseEvents(args._event, args._interval, req);
     if (error) {
         return error;

@@ -34,7 +34,11 @@ struct KperfRequest {
 };
 
 // Do not prefer the PC-capturing counters (PMC 5-7 on Apple silicon)
-#define KPERF_REQ_NO_PC_CAPTURE 1
+#define KPERF_REQ_NO_PC_CAPTURE  1
+// Count in kernel mode too. By default counters count user mode only: otherwise
+// the kernel's own work for each sample (PMI handler, AST-time user stack walk)
+// runs on the sampled thread and is counted, and attributed to its user stack.
+#define KPERF_REQ_KERNEL_COUNTING 2
 
 struct KperfResponse {
     uint32_t magic;

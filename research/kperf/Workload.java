@@ -22,11 +22,14 @@ public class Workload {
         System.out.println("pid " + ProcessHandle.current().pid() + " ready");
         long deadline = System.nanoTime() + seconds * 1_000_000_000L;
         int p = 0;
+        long rounds = 0, t0 = System.nanoTime();
         while (System.nanoTime() < deadline) {
             p = chase(p, 2_000_000);
             sink += scan();
             sink += mix(p, 20_000_000);
+            rounds++;
         }
+        System.out.printf("rounds/s %.2f%n", rounds / ((System.nanoTime() - t0) / 1e9));
     }
 
     static int chase(int p, int steps) {

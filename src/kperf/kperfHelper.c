@@ -136,7 +136,12 @@ typedef struct {
 #define SAMPLE_FLAG_PEND_USER (1u << 0)
 #define KPC_DESC_COUNTER(desc) (((desc) >> 32) & 0xffff)
 #define KPC_DESC_FLAGS(desc)   ((desc) >> 48)
+#define KPC_KERNEL_PC          0x01
 #define KPC_CAPTURED_PC        0x08
+
+// arm64 kpc config word: counting modes (XNU osfmk/arm64/kpc.c). All zero means all modes.
+#define CFGWORD_EL0A64EN_MASK  0x20000
+#define CFGWORD_ALLMODES_MASK  0xf0000
 
 static int kdCtl(int op, int arg, void* buf, size_t* len) {
     int mib[4] = {CTL_KERN, KERN_KDEBUG, op, arg};
@@ -359,6 +364,11 @@ static int startSampling(pid_t pid, const struct KperfRequest* req, struct Kperf
             }
         }
     }
+    if (!(req->flags & KPERF_REQ_KERNEL_COUNTING)) {
+        for (uint32_t c = 0; c < nconfig; c++) {
+            if (regs[c] != 0) regs[c] = (regs[c] & ~(uint64_t)CFGWORD_ALLMODES_MASK) | CFGWORD_EL0A64EN_MASK;
+        }
+    }
     for (uint32_t i = 0; i < req->num_events; i++) {
         if (resp->counter[i] == 0) {
             snprintf(msg, msglen, "No free counter for %s", req->events[i].name);
@@ -435,7 +445,7 @@ static size_t outlen;
 static int client_fd = -1;
 
 static struct {
-    uint64_t pmis, stacks, precise;
+    uint64_t pmis, kernel_pmis, stacks, precise;
 } stats[KPERF_MAX_EVENTS];
 static uint64_t unattributed;
 
@@ -527,6 +537,7 @@ static bool handleEvent(const kd_buf* e) {
                 p->pmis[event]++;
                 p->precise_pc[event] = (KPC_DESC_FLAGS(pmi->desc) & KPC_CAPTURED_PC) ? pmi->pc : 0;
                 stats[event].pmis++;
+                if (KPC_DESC_FLAGS(pmi->desc) & KPC_KERNEL_PC) stats[event].kernel_pmis++;
             }
             pmi->desc = 0;
         }
@@ -649,10 +660,12 @@ static void serveClient(pid_t expected_pid) {
     kdebugTeardown();
     resetCounters();
     if (verbose) {
-        fprintf(stderr, "Stopped sampling pid %d (%llu stacks without a PMI):\n", pid, (unsigned long long)unattributed);
+        fprintf(stderr, "Stopped sampling pid %d (%s counting, %llu stacks without a PMI):\n", pid,
+                (req.flags & KPERF_REQ_KERNEL_COUNTING) ? "user+kernel" : "user-only", (unsigned long long)unattributed);
         for (uint32_t i = 0; i < req.num_events; i++) {
-            fprintf(stderr, "  %-32s PMC%u: %llu PMIs, %llu stacks, %llu with precise PC (%.1f%%)\n",
+            fprintf(stderr, "  %-32s PMC%u: %llu PMIs (%.1f%% in kernel), %llu stacks, %llu with precise PC (%.1f%%)\n",
                     req.events[i].name, resp.counter[i], (unsigned long long)stats[i].pmis,
+                    stats[i].pmis ? 100.0 * stats[i].kernel_pmis / stats[i].pmis : 0.0,
                     (unsigned long long)stats[i].stacks, (unsigned long long)stats[i].precise,
                     stats[i].stacks ? 100.0 * stats[i].precise / stats[i].stacks : 0.0);
         }
