@@ -69,3 +69,11 @@ Results (agent started at JVM launch, so setup is included):
 - Inlined frames resolve: the top miss stack is `…call_stub;[interpreted];Workload.chase;Workload.step`.
 - The reader thread samples itself. The first cut cost 15% of L1D misses, because `findNativeMethod` scans every loaded library per frame. A direct-mapped native PC cache brought it to 0.19% (0.08% of cycles).
 - One helper served three successive JVMs.
+
+## asprof launcher on a real app
+
+`sudo asprof -e cycles -d 30 -f out.html <pid>` against an idle sbt 2.0 server (JDK 21, `-XX:+PreserveFramePointer -XX:+DebugNonSafepoints`):
+
+- `asprof` launched `asprof-kperf -p <pid>` for each session. The helper served the agent, then removed its socket and private `/tmp` directory, and exited.
+- The stacks are plausible, mixing compiled, interpreted, lambda and stub frames. For example: `ThreadPoolExecutor.runWorker` → `Executors$RunnableAdapter.call` → `sbt/internal/TaskProgress$$Lambda…run` → `TaskProgress.$anonfun$schedule$1` → `JFunction0$mcV$sp.apply` → `itable stub`.
+- sbt was idle, so there were only 29 samples in 10s at the default 1M-cycle period.
