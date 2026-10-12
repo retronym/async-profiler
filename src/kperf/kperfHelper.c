@@ -9,14 +9,20 @@
  * kdebug trace buffer, and streams them to the async-profiler agent running in
  * that process. See research/kperf/DESIGN.md.
  *
- * Usage: sudo asprof-kperf -s <socket path> [-u <uid>]
+ * Usage: sudo asprof-kperf -s <socket path> [-u <uid>]   serve any number of agents
+ *        sudo asprof-kperf -s <socket path> -p <pid>    serve exactly one session for <pid>
  *
- * The helper only ever samples the pid of the connected socket peer.
+ * The helper only ever samples the pid of the connected socket peer. In the
+ * one-shot mode used by asprof, it also rejects peers other than <pid>, and
+ * returns as soon as the socket is ready, continuing in the background.
  */
 
 #include <dlfcn.h>
 #include <errno.h>
 #include <getopt.h>
+#include <libgen.h>
+#include <limits.h>
+#include <libproc.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdbool.h>
@@ -328,11 +334,17 @@ static bool readFully(int fd, void* buf, size_t len) {
     return true;
 }
 
-static void serveClient(void) {
+static bool verbose = true;
+
+static void serveClient(pid_t expected_pid) {
     pid_t pid = 0;
     socklen_t len = sizeof(pid);
     if (getsockopt(client_fd, SOL_LOCAL, LOCAL_PEERPID, &pid, &len) != 0 || pid <= 0) {
         perror("LOCAL_PEERPID");
+        return;
+    }
+    if (expected_pid != 0 && pid != expected_pid) {
+        fprintf(stderr, "Rejected connection from pid %d, expected %d\n", pid, expected_pid);
         return;
     }
 
@@ -350,7 +362,7 @@ static void serveClient(void) {
         if (resp.error == 0) { kdebugTeardown(); resetCounters(); }
         return;
     }
-    fprintf(stderr, "Sampling pid %d: %s every %llu\n", pid, req.event, (unsigned long long)req.period);
+    if (verbose) fprintf(stderr, "Sampling pid %d: %s every %llu\n", pid, req.event, (unsigned long long)req.period);
 
     size_t bufcount = 1 << 16;
     kd_buf* buf = malloc(bufcount * sizeof(kd_buf));
@@ -375,22 +387,32 @@ static void serveClient(void) {
     free(buf);
     kdebugTeardown();
     resetCounters();
-    fprintf(stderr, "Stopped sampling pid %d (%llu trace events)\n", pid, (unsigned long long)samples_before);
+    if (verbose) fprintf(stderr, "Stopped sampling pid %d (%llu trace events)\n", pid, (unsigned long long)samples_before);
+}
+
+// Waits for a connection for at most timeout_ms; returns -1 on timeout or error
+static int acceptWithTimeout(int s, int timeout_ms) {
+    struct pollfd pfd = {s, POLLIN, 0};
+    int r;
+    while ((r = poll(&pfd, 1, timeout_ms)) < 0 && errno == EINTR && !terminated);
+    return r > 0 ? accept(s, NULL, NULL) : -1;
 }
 
 int main(int argc, char** argv) {
     const char* path = NULL;
     uid_t uid = getenv("SUDO_UID") ? (uid_t)atoi(getenv("SUDO_UID")) : getuid();
+    pid_t target_pid = 0;
     int opt;
-    while ((opt = getopt(argc, argv, "s:u:")) != -1) {
+    while ((opt = getopt(argc, argv, "s:u:p:")) != -1) {
         switch (opt) {
             case 's': path = optarg; break;
             case 'u': uid = (uid_t)atoi(optarg); break;
+            case 'p': target_pid = (pid_t)atoi(optarg); break;
             default: path = NULL; optind = argc; break;
         }
     }
     if (path == NULL) {
-        fprintf(stderr, "Usage: sudo %s -s <socket path> [-u <uid allowed to connect>]\n", argv[0]);
+        fprintf(stderr, "Usage: sudo %s -s <socket path> [-u <uid> | -p <pid>]\n", argv[0]);
         return 1;
     }
     if (!loadFrameworks()) return 1;
@@ -398,6 +420,18 @@ int main(int argc, char** argv) {
     if (kpc_force_all_ctrs_get(&forced) != 0) {
         fprintf(stderr, "Cannot access PMU: asprof-kperf must run as root\n");
         return 1;
+    }
+
+    gid_t gid = (gid_t)-1;
+    if (target_pid != 0) {
+        struct proc_bsdinfo info;
+        if (proc_pidinfo(target_pid, PROC_PIDTBSDINFO, 0, &info, sizeof(info)) != sizeof(info)) {
+            fprintf(stderr, "Process %d not found\n", target_pid);
+            return 1;
+        }
+        uid = info.pbi_uid;
+        gid = info.pbi_gid;
+        verbose = false;
     }
 
     signal(SIGPIPE, SIG_IGN);
@@ -421,9 +455,42 @@ int main(int argc, char** argv) {
     }
     // Only the target user may connect
     chmod(path, 0600);
-    if (chown(path, uid, (gid_t)-1) != 0) perror("chown");
-    fprintf(stderr, "asprof-kperf listening on %s for uid %d\n", path, uid);
+    if (chown(path, uid, gid) != 0) perror("chown");
 
+    if (target_pid != 0) {
+        // asprof places the socket in a private directory: hand it to the target user too
+        char dir[PATH_MAX];
+        strncpy(dir, path, sizeof(dir) - 1);
+        dir[sizeof(dir) - 1] = 0;
+        char* d = dirname(dir);
+        if (strcmp(d, "/tmp") != 0 && strcmp(d, "/") != 0 && chown(d, uid, gid) != 0) perror("chown");
+
+        // Detach: the caller continues once the socket is ready.
+        // A new session keeps Ctrl-C on the asprof terminal from tearing us down
+        // before the agent has stopped.
+        pid_t child = fork();
+        if (child < 0) {
+            perror("fork");
+            return 1;
+        } else if (child > 0) {
+            return 0;
+        }
+        setsid();
+
+        client_fd = acceptWithTimeout(s, 30000);
+        if (client_fd >= 0) {
+            serveClient(target_pid);
+            close(client_fd);
+        } else {
+            fprintf(stderr, "asprof-kperf: no connection from pid %d\n", target_pid);
+        }
+        close(s);
+        unlink(path);
+        if (strcmp(d, "/tmp") != 0 && strcmp(d, "/") != 0) rmdir(d);
+        return 0;
+    }
+
+    fprintf(stderr, "asprof-kperf listening on %s for uid %d\n", path, uid);
     while (!terminated) {
         client_fd = accept(s, NULL, NULL);
         if (client_fd < 0) {
@@ -431,7 +498,7 @@ int main(int argc, char** argv) {
             perror("accept");
             break;
         }
-        serveClient();
+        serveClient(0);
         close(client_fd);
         client_fd = -1;
     }
