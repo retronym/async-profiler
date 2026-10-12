@@ -621,6 +621,7 @@ public class JfrReader implements Closeable {
         registerEvent("jdk.ObjectCount", ObjectCount.class);
         registerEvent("jdk.ObjectCountAfterGC", ObjectCount.class);
         registerEvent("profiler.ProcessSample", ProcessSample.class);
+        registerEvent("profiler.HardwareSample", HardwareSample.class);
 
         JfrClass wallClass = typesByName.get("profiler.WallClockSample");
         hasWallTimeSpan = wallClass != null && wallClass.field("timeSpan") != null;

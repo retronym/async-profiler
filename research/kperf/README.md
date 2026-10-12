@@ -95,7 +95,7 @@ Results (agent started at JVM launch, so setup is included):
 
 **Scope**
 
-- **Samples are recorded as `PERF_SAMPLE`,** so JFR doesn't carry the event name. With several events, each stack gets a root pseudo-frame (`[cycles]`, …) so their profiles do not merge; that frame is also all JFR consumers see.
+- **Collapsed/HTML output has no per-sample event field,** so with several events each stack gets a root pseudo-frame (`cycles`, …). JFR output uses `profiler.HardwareSample` instead (below).
 - **The interrupt fires on every process.** The pid filter is applied after the interrupt, so a small period costs kernel time across the whole system.
 - **The one-shot helper (`-p <pid>`) gives up after 30s** if the agent hasn't connected.
 - **No automated tests.** `run.sh` and `spike.sh` are manual, root-only integration tests.
@@ -123,6 +123,24 @@ Attribution of L1D load misses, by leaf:
 
 The shuffle in `main` misses on its `next[j]` loads; with skid, ~15% of misses land in the `Random` code it calls next. Precise PCs put them back on the loads, and move misses from the `chase` loop onto the inlined `step` load.
 
+## Which events capture, per-event stats, JFR
+
+- **Capture support is in kperfdata's database:** `pc_capture_counters_mask` on 19 of 136 events in `/usr/share/kpep/cpu_100000c_2_f76c5b1a.plist` (M5 Pro). That covers branch mispredicts, L1D load/store misses, TLB misses and load sources, all `0xe0` (PMC 5–7), plus `INST_MICROCODED` (`0x80`). There is nothing for cycles or instructions. `kpep_event` doesn't expose the field, so the helper reads the plist (found by `hw.cputype`/`cpusubtype`/`cpufamily`).
+- **Allocation is three-pass:** capture-capable events go on their capture PMCs, then other events on PMCs no requested event could capture on, then anything left over.
+  - `cycles+cache-misses+instructions+branch-misses` → PMC2 / **PMC5** / PMC3 / **PMC6**.
+- **Per-event capture rates** (helper, 15s):
+
+| event | PMC | precise PC | used as leaf (agent) |
+|---|---|---|---|
+| `cache-misses` | 5 | 100% | 99.2% |
+| `branch-misses` | 6 | 98% | ~55–60% |
+| `cycles` / `instructions` | 2 / 3 | 0% (not capable) | — |
+
+  For branch mispredicts, ~40% of precise PCs lie outside the interrupted PC's function. A mispredicted call or return transfers control before the PMI, so the latched PC is in the caller or callee; the agent currently drops those.
+- **PMIs of different events can coalesce into one stack.** The helper sends one sample per event, sharing the stack, each with its own PMI count and captured PC. Otherwise all the counts go to whichever event fired last; cache-misses was overstated by ~3% before this fix.
+- **`profiler.HardwareSample` JFR event:** `startTime`, `sampledThread`, `stackTrace`, `event` (as requested, e.g. `cache-misses`), `value` (period × PMIs) and `precise`. `jdk.ExecutionSample` has no weight field, so the event count was lost as well as the name. The JDK's `jfr print` reads the events, and per-event `value` sums equal PMIs × period exactly.
+- **`jfrconv --hw <event>`** selects one event's samples and weights them by event count (`--total` implied); the units are `events`.
+
 ## Multiple events and exclusivity
 
 - `-e cycles+cache-misses+instructions` (up to 4, optional `@period` each) runs in one session on separate PMCs; the stack root carries the event name. The per-event profiles match the single-event runs.
@@ -130,13 +148,12 @@ The shuffle in `main` misses on its `next[j]` loads; with skid, ~15% of misses l
 
 ## Future work
 
-1. ~~Precise PC capture~~ (done). Remaining: find which events support capture (probe each kpep event on PMC5), only prefer PMCs 5–7 for those, and report per-event capture rates.
+1. ~~Precise PC capture~~, ~~event-aware allocation~~, ~~per-event capture rates~~ (done). Remaining: for branch mispredicts, use a precise PC that is outside the leaf function as an extra leaf frame instead of dropping it.
 2. ~~Helper exclusivity check~~ (done).
 3. **`benchLabAsync` hook** (scala3 bench-lab). Add `ASYNC_PROFILER_KPERF` support so JMH forks can use a long-running helper (`sudo asprof-kperf -s /tmp/asprof-kperf.sock` plus `-prof "async:libPath=…;event=…;rawCommand=kperf=/tmp/asprof-kperf.sock"`) without fighting sbt's `;` splitting.
-4. ~~Multiple events per session~~ (done). Remaining: a proper JFR event carrying the event name instead of a root pseudo-frame, and per-stack ratios (e.g. misses per kilo-instruction) in the converter.
+4. ~~Multiple events per session~~, ~~JFR event with name and value~~ (done). Remaining: per-stack ratios (e.g. misses per kilo-instruction) in the converter; `--hw` support in the heatmap/pprof/OTLP converters beyond what `JfrConverter` gives them.
 5. **Use kernel timestamps,** converted to async-profiler's clock.
 6. **Verify the method at resolve time,** e.g. check it is still live at the sample's timestamp, or track compiled-method load and unload events.
 7. **Cheaper thread-id mapping.** Look up only the missing thread instead of re-listing all of them.
 8. **Kernel stacks** (`KPERF_SAMPLER_KSTACK`): cheap to collect, but need kernel symbolication.
-9. **An event type that records the event name** in JFR, if `PERF_SAMPLE` proves too lossy.
 10. **Upstream hygiene:** automated tests gated on root and real hardware; docs in `CpuSamplingEngines.md`; signing and notarizing `asprof-kperf`; Intel Mac testing; a launchd-daemon option to avoid `sudo` per session.

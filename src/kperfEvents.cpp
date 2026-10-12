@@ -23,6 +23,7 @@ int KperfEvents::_fd = -1;
 pthread_t KperfEvents::_thread;
 int KperfEvents::_max_depth;
 int KperfEvents::_num_events;
+bool KperfEvents::_jfr;
 u64 KperfEvents::_periods[KPERF_MAX_EVENTS];
 char KperfEvents::_names[KPERF_MAX_EVENTS][KPERF_EVENT_LEN];
 char KperfEvents::_title[KPERF_MAX_EVENTS * KPERF_EVENT_LEN];
@@ -169,6 +170,7 @@ Error KperfEvents::start(Arguments& args) {
         return error;
     }
     _max_depth = args._jstackdepth;
+    _jfr = args._output == OUTPUT_JFR;
 
     struct sockaddr_un sun = {0};
     sun.sun_family = AF_UNIX;
@@ -231,7 +233,7 @@ void KperfEvents::readLoop() {
     uint64_t pcs[KPERF_MAX_FRAMES];
     int max_frames = _max_depth + KPERF_MAX_FRAMES + 8;
     ASGCT_CallFrame* frames = (ASGCT_CallFrame*)calloc(max_frames, sizeof(ASGCT_CallFrame));
-    u64 samples = 0, with_pc = 0, used_pc = 0;
+    u64 samples[KPERF_MAX_EVENTS] = {0}, with_pc[KPERF_MAX_EVENTS] = {0}, used_pc[KPERF_MAX_EVENTS] = {0};
 
     KperfSample s;
     while (readFully(_fd, &s, sizeof(s))) {
@@ -244,26 +246,31 @@ void KperfEvents::readLoop() {
 
         uint64_t precise_pc = s.precise_pc;
         int num_frames = StackWalker::resolveRaw(pcs, s.num_frames, s.fixup, &precise_pc, frames, max_frames - 8);
-        if (s.precise_pc != 0) with_pc++;
-        if (precise_pc != 0) used_pc++;
 
         int event = s.event < _num_events ? s.event : 0;
-        if (_num_events > 1) {
-            // Root pseudo-frame, so profiles of different events do not merge
+        samples[event]++;
+        if (s.precise_pc != 0) with_pc[event]++;
+        if (precise_pc != 0) used_pc[event]++;
+
+        if (_num_events > 1 && !_jfr) {
+            // Collapsed and flame graph output have no per-sample event field:
+            // a root pseudo-frame keeps the profiles of different events apart
             frames[num_frames].bci = BCI_NATIVE_FRAME;
             frames[num_frames].method_id = (jmethodID)_names[event];
             num_frames++;
         }
 
         int tid = tids.lookup(s.thread_id);
-        ExecutionEvent ev(TSC::ticks());
-        profiler->recordExternalSample(_periods[event] * s.weight, tid, PERF_SAMPLE, &ev, num_frames, frames);
-        samples++;
+        u64 value = _periods[event] * s.weight;
+        HardwareEvent ev(TSC::ticks(), _names[event], value, precise_pc != 0);
+        profiler->recordExternalSample(value, tid, HW_SAMPLE, &ev, num_frames, frames);
     }
 
     free(frames);
-    Log::info("kperf: %llu samples, %llu with precise PC, %llu used as leaf", (unsigned long long)samples,
-              (unsigned long long)with_pc, (unsigned long long)used_pc);
+    for (int i = 0; i < _num_events; i++) {
+        Log::info("kperf: %s: %llu samples, %llu with precise PC, %llu used as leaf", _names[i],
+                  (unsigned long long)samples[i], (unsigned long long)with_pc[i], (unsigned long long)used_pc[i]);
+    }
 }
 
 #endif // __APPLE__

@@ -255,6 +255,15 @@ JfrMetadata::JfrMetadata() : Element("root") {
                 << field("stackTrace", T_STACK_TRACE, "Stack Trace", F_CPOOL)
                 << field("address", T_LONG, "Address", F_ADDRESS))
 
+            << (type("profiler.HardwareSample", T_HW_SAMPLE, "Hardware Counter Sample")
+                << category("Profiler")
+                << field("startTime", T_LONG, "Start Time", F_TIME_TICKS)
+                << field("sampledThread", T_THREAD, "Thread", F_CPOOL)
+                << field("stackTrace", T_STACK_TRACE, "Stack Trace", F_CPOOL)
+                << field("event", T_STRING, "Event")
+                << field("value", T_LONG, "Value")
+                << field("precise", T_BOOLEAN, "Precise PC"))
+
             << (type("profiler.NativeLock", T_NATIVE_LOCK, "Native Lock Sample")
                 << category("Java Virtual Machine", "Native Lock")
                 << field("startTime", T_LONG, "Start Time", F_TIME_TICKS)

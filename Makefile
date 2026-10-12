@@ -187,7 +187,7 @@ build/$(ASPROF): src/main/* src/jattach/* src/fdtransfer.h
 	$(STRIP) $@
 
 build/$(ASPROF_KPERF): src/kperf/* src/kperfProtocol.h
-	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ src/kperf/*.c
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ src/kperf/*.c -framework CoreFoundation
 	$(STRIP) $@
 
 build/$(JFRCONV): src/launcher/launcher.sh build/$(CONVERTER_JAR)

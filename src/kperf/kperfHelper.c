@@ -17,6 +17,7 @@
  * returns as soon as the socket is ready, continuing in the background.
  */
 
+#include <CoreFoundation/CoreFoundation.h>
 #include <dlfcn.h>
 #include <errno.h>
 #include <getopt.h>
@@ -43,9 +44,6 @@
 #define KPERF_SAMPLER_TH_INFO       (1u << 0)
 #define KPERF_SAMPLER_USTACK        (1u << 3)
 
-// Apple silicon PMCs that latch the exact PC of the event (XNU PMC_SUPPORTS_PC_CAPTURE)
-#define PC_CAPTURE_FIRST 5
-#define PC_CAPTURE_LAST  7
 
 typedef struct kpep_db kpep_db;
 typedef struct kpep_config kpep_config;
@@ -213,6 +211,56 @@ static void resetCounters(void) {
 // Absolute PMC -> index into the request's events, or -1
 static int counter_event[KPC_MAX_COUNTERS];
 
+// Which PMCs can latch the exact PC of an event is a property of the event:
+// kperfdata's database has it as "pc_capture_counters_mask" (0xe0, i.e. PMC 5-7,
+// for the L1D/TLB miss, load source and branch mispredict events on Apple
+// silicon; nothing for cycles or instructions), but its event struct does not
+// expose it, so read the database plist for this CPU directly.
+static CFDictionaryRef kpep_events;
+
+static void loadCaptureMasks(void) {
+    int type = 0, subtype = 0;
+    uint32_t family = 0;
+    size_t len = sizeof(type);
+    sysctlbyname("hw.cputype", &type, &len, NULL, 0);
+    len = sizeof(subtype);
+    sysctlbyname("hw.cpusubtype", &subtype, &len, NULL, 0);
+    len = sizeof(family);
+    sysctlbyname("hw.cpufamily", &family, &len, NULL, 0);
+
+    char path[128];
+    snprintf(path, sizeof(path), "/usr/share/kpep/cpu_%x_%x_%x.plist", type, subtype, family);
+    CFURLRef url = CFURLCreateFromFileSystemRepresentation(NULL, (const UInt8*)path, strlen(path), false);
+    CFReadStreamRef stream = url != NULL ? CFReadStreamCreateWithFile(NULL, url) : NULL;
+    if (stream != NULL && CFReadStreamOpen(stream)) {
+        CFPropertyListRef plist = CFPropertyListCreateWithStream(NULL, stream, 0, kCFPropertyListImmutable, NULL, NULL);
+        if (plist != NULL && CFGetTypeID(plist) == CFDictionaryGetTypeID()) {
+            CFDictionaryRef sys = CFDictionaryGetValue(plist, CFSTR("system"));
+            CFDictionaryRef cpu = sys != NULL ? CFDictionaryGetValue(sys, CFSTR("cpu")) : NULL;
+            kpep_events = cpu != NULL ? CFDictionaryGetValue(cpu, CFSTR("events")) : NULL;
+            if (kpep_events != NULL) CFRetain(kpep_events);
+        }
+        if (plist != NULL) CFRelease(plist);
+        CFReadStreamClose(stream);
+    }
+    if (stream != NULL) CFRelease(stream);
+    if (url != NULL) CFRelease(url);
+    if (kpep_events == NULL) {
+        fprintf(stderr, "asprof-kperf: cannot read %s; precise PC capture disabled\n", path);
+    }
+}
+
+static uint32_t captureMask(const char* name) {
+    if (kpep_events == NULL) return 0;
+    CFStringRef key = CFStringCreateWithCString(NULL, name, kCFStringEncodingUTF8);
+    CFDictionaryRef ev = CFDictionaryGetValue(kpep_events, key);
+    CFRelease(key);
+    CFNumberRef mask = ev != NULL ? CFDictionaryGetValue(ev, CFSTR("pc_capture_counters_mask")) : NULL;
+    uint32_t v = 0;
+    if (mask != NULL) CFNumberGetValue(mask, kCFNumberSInt32Type, &v);
+    return v;
+}
+
 // Looks up the event's counter mask and its counter-independent config word.
 static bool eventConfig(kpep_db* db, const char* name, uint32_t* mask, uint64_t* config) {
     kpep_event* ev = NULL;
@@ -281,19 +329,28 @@ static int startSampling(pid_t pid, const struct KperfRequest* req, struct Kperf
         }
     }
 
-    // Assign absolute PMCs: PC-capturing ones first, then any other allowed counter
+    // Assign absolute PMCs in three passes:
+    //  0. events that support PC capture, on a PMC that captures for them
+    //  1. other events, on PMCs that no event in this request could capture on
+    //  2. whatever is left, on any allowed PMC
+    uint32_t capture_masks[KPERF_MAX_EVENTS];
+    uint32_t any_capture = 0;
+    bool prefer_capture = !(req->flags & KPERF_REQ_NO_PC_CAPTURE);
+    for (uint32_t i = 0; i < req->num_events; i++) {
+        capture_masks[i] = prefer_capture ? captureMask(req->events[i].name) & masks[i] : 0;
+        any_capture |= capture_masks[i];
+    }
     for (int c = 0; c < KPC_MAX_COUNTERS; c++) counter_event[c] = -1;
     uint32_t used = 0;
-    bool prefer_capture = !(req->flags & KPERF_REQ_NO_PC_CAPTURE);
-    for (int pass = prefer_capture ? 0 : 1; pass < 2; pass++) {
+    for (int pass = 0; pass < 3; pass++) {
         for (uint32_t i = 0; i < req->num_events; i++) {
             if (resp->counter[i] != 0) continue;
+            uint32_t allowed = pass == 0 ? capture_masks[i] : pass == 1 ? masks[i] & ~any_capture : masks[i];
             for (uint32_t c = nfixed; c < nfixed + nconfig; c++) {
-                bool capture = c >= PC_CAPTURE_FIRST && c <= PC_CAPTURE_LAST;
-                if ((pass == 0 && !capture) || (used & (1u << c)) || !(masks[i] & (1u << c))) continue;
+                if ((used & (1u << c)) || !(allowed & (1u << c))) continue;
                 used |= 1u << c;
                 resp->counter[i] = (uint8_t)c;
-                resp->pc_capture[i] = capture;
+                resp->pc_capture[i] = (capture_masks[i] & (1u << c)) != 0;
                 counter_event[c] = (int)i;
                 regs[c - nfixed] = configs[i];
                 periods[c - nfixed] = req->events[i].period;
@@ -351,9 +408,8 @@ out:
 // Per-thread state: the PMIs of our pid since the last stack, and the stack being assembled
 typedef struct {
     uint64_t tid;
-    uint32_t pmis;
-    int event;
-    uint64_t precise_pc;
+    uint32_t pmis[KPERF_MAX_EVENTS];        // per event, coalesced into the next stack
+    uint64_t precise_pc[KPERF_MAX_EVENTS];  // latest captured PC per event
     uint64_t timestamp;
     uint32_t expect;
     uint32_t have;
@@ -379,8 +435,9 @@ static size_t outlen;
 static int client_fd = -1;
 
 static struct {
-    uint64_t pmis, stacks, precise, unattributed;
-} stats;
+    uint64_t pmis, stacks, precise;
+} stats[KPERF_MAX_EVENTS];
+static uint64_t unattributed;
 
 static bool flushOut(void) {
     size_t off = 0;
@@ -396,7 +453,7 @@ static bool flushOut(void) {
     return true;
 }
 
-static bool emit(Pending* p) {
+static bool emitOne(Pending* p, int event, uint32_t pmis) {
     // The last of the non-async frames is the fixup value appended by
     // callstack_fixup_user(); send it separately.
     uint32_t n = p->expect > 0 ? p->expect - 1 : 0;
@@ -405,26 +462,40 @@ static bool emit(Pending* p) {
     s.timestamp = p->timestamp;
     s.thread_id = p->tid;
     s.fixup = p->expect > 0 ? p->frames[p->expect - 1] : 0;
-    s.precise_pc = p->precise_pc;
+    s.precise_pc = p->precise_pc[event];
     s.flags = p->flags;
-    s.event = p->event >= 0 ? (uint16_t)p->event : 0;
-    s.weight = p->pmis > 0 ? (p->pmis > 0xffff ? 0xffff : (uint16_t)p->pmis) : 1;
+    s.event = (uint16_t)event;
+    s.weight = pmis > 0xffff ? 0xffff : pmis > 0 ? (uint16_t)pmis : 1;
     s.num_frames = n;
 
-    stats.stacks++;
-    if (p->precise_pc) stats.precise++;
-    if (p->pmis == 0) stats.unattributed++;
+    stats[event].stacks++;
+    if (s.precise_pc) stats[event].precise++;
 
     size_t need = sizeof(s) + n * sizeof(uint64_t);
     if (outlen + need > sizeof(outbuf) && !flushOut()) return false;
     memcpy(outbuf + outlen, &s, sizeof(s));
     memcpy(outbuf + outlen + sizeof(s), p->frames, n * sizeof(uint64_t));
     outlen += need;
-
-    p->pmis = 0;
-    p->event = -1;
-    p->precise_pc = 0;
     return true;
+}
+
+// PMIs of several events can coalesce into one stack: send one sample per event,
+// each weighted by its own PMI count, sharing the stack
+static bool emit(Pending* p) {
+    bool any = false, ok = true;
+    for (int i = 0; i < KPERF_MAX_EVENTS && ok; i++) {
+        if (p->pmis[i] > 0) {
+            ok = emitOne(p, i, p->pmis[i]);
+            any = true;
+        }
+    }
+    if (!any) {
+        unattributed++;
+        ok = emitOne(p, 0, 1);
+    }
+    memset(p->pmis, 0, sizeof(p->pmis));
+    memset(p->precise_pc, 0, sizeof(p->precise_pc));
+    return ok;
 }
 
 static Pending* pendingFor(uint64_t tid) {
@@ -435,7 +506,6 @@ static Pending* pendingFor(uint64_t tid) {
     Pending* p = &pending[num_pending++];
     memset(p, 0, sizeof(*p));
     p->tid = tid;
-    p->event = -1;
     return p;
 }
 
@@ -452,11 +522,13 @@ static bool handleEvent(const kd_buf* e) {
             CpuPmi* pmi = &cpu_pmi[e->cpuid];
             Pending* p = pendingFor(e->arg5);
             uint32_t ctr = (uint32_t)KPC_DESC_COUNTER(pmi->desc);
-            p->pmis++;
-            p->event = ctr < KPC_MAX_COUNTERS ? counter_event[ctr] : -1;
-            p->precise_pc = (KPC_DESC_FLAGS(pmi->desc) & KPC_CAPTURED_PC) ? pmi->pc : 0;
+            int event = ctr < KPC_MAX_COUNTERS ? counter_event[ctr] : -1;
+            if (event >= 0) {
+                p->pmis[event]++;
+                p->precise_pc[event] = (KPC_DESC_FLAGS(pmi->desc) & KPC_CAPTURED_PC) ? pmi->pc : 0;
+                stats[event].pmis++;
+            }
             pmi->desc = 0;
-            stats.pmis++;
         }
     } else if (id == PERF_CS_UHDR) {
         Pending* p = pendingFor(e->arg5);
@@ -555,6 +627,7 @@ static void serveClient(pid_t expected_pid) {
     size_t bufcount = 1 << 16;
     kd_buf* buf = malloc(bufcount * sizeof(kd_buf));
     memset(&stats, 0, sizeof(stats));
+    unattributed = 0;
     memset(cpu_pmi, 0, sizeof(cpu_pmi));
     num_pending = 0;
     outlen = 0;
@@ -576,9 +649,13 @@ static void serveClient(pid_t expected_pid) {
     kdebugTeardown();
     resetCounters();
     if (verbose) {
-        fprintf(stderr, "Stopped sampling pid %d: %llu PMIs, %llu stacks, %llu with precise PC, %llu unattributed\n",
-                pid, (unsigned long long)stats.pmis, (unsigned long long)stats.stacks,
-                (unsigned long long)stats.precise, (unsigned long long)stats.unattributed);
+        fprintf(stderr, "Stopped sampling pid %d (%llu stacks without a PMI):\n", pid, (unsigned long long)unattributed);
+        for (uint32_t i = 0; i < req.num_events; i++) {
+            fprintf(stderr, "  %-32s PMC%u: %llu PMIs, %llu stacks, %llu with precise PC (%.1f%%)\n",
+                    req.events[i].name, resp.counter[i], (unsigned long long)stats[i].pmis,
+                    (unsigned long long)stats[i].stacks, (unsigned long long)stats[i].precise,
+                    stats[i].stacks ? 100.0 * stats[i].precise / stats[i].stacks : 0.0);
+        }
     }
 }
 
@@ -608,6 +685,7 @@ int main(int argc, char** argv) {
         return 1;
     }
     if (!loadFrameworks()) return 1;
+    loadCaptureMasks();
     int forced;
     if (kpc_force_all_ctrs_get(&forced) != 0) {
         fprintf(stderr, "Cannot access PMU: asprof-kperf must run as root\n");

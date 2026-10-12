@@ -1212,6 +1212,18 @@ class Recording {
         buf->put8(start, buf->offset() - start);
     }
 
+    void recordHardwareSample(Buffer* buf, int tid, u32 call_trace_id, HardwareEvent* event) {
+        int start = buf->skip(1);
+        buf->put8(T_HW_SAMPLE);
+        buf->putVar64(event->_start_time);
+        buf->putVar32(tid);
+        buf->putVar32(call_trace_id);
+        buf->putByteString(event->_name);
+        buf->putVar64(event->_value);
+        buf->put8(event->_precise ? 1 : 0);
+        buf->put8(start, buf->offset() - start);
+    }
+
     void recordWindow(Buffer* buf, int tid, ProfilingWindow* event) {
         int start = buf->skip(1);
         buf->put8(T_WINDOW);
@@ -1458,6 +1470,9 @@ void FlightRecorder::recordEvent(int lock_index, int tid, u32 call_trace_id,
                 break;
             case NATIVE_LOCK_SAMPLE:
                 _rec->recordNativeLockSample(buf, tid, call_trace_id, (NativeLockEvent*)event);
+                break;
+            case HW_SAMPLE:
+                _rec->recordHardwareSample(buf, tid, call_trace_id, (HardwareEvent*)event);
                 break;
             case PROFILING_WINDOW:
                 _rec->recordWindow(buf, tid, (ProfilingWindow*)event);

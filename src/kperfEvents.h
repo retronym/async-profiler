@@ -22,6 +22,7 @@ class KperfEvents : public Engine {
     static pthread_t _thread;
     static int _max_depth;
     static int _num_events;
+    static bool _jfr;
     static u64 _periods[KPERF_MAX_EVENTS];
     static char _names[KPERF_MAX_EVENTS][KPERF_EVENT_LEN];  // as requested, e.g. cache-misses
     static char _title[KPERF_MAX_EVENTS * KPERF_EVENT_LEN];

@@ -27,6 +27,7 @@ enum EventType {
     PARK_SAMPLE,
     PROFILING_WINDOW,
     USER_EVENT,
+    HW_SAMPLE,
 };
 
 class Event {
@@ -81,6 +82,18 @@ class NativeLockEvent : public Event {
     u64 _start_time;
     u64 _end_time;
     uintptr_t _address;
+};
+
+// Hardware counter sample (kperf on macOS): `_value` events of type `_name`
+class HardwareEvent : public Event {
+  public:
+    u64 _start_time;
+    const char* _name;
+    u64 _value;
+    bool _precise;
+
+    HardwareEvent(u64 start_time, const char* name, u64 value, bool precise) :
+        _start_time(start_time), _name(name), _value(value), _precise(precise) {}
 };
 
 class LiveObject : public EventWithClassId {
