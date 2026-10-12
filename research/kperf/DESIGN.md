@@ -10,7 +10,7 @@ What the prototype lacks is good Java symbolication: no inlined frames, interpre
 
 ## Proposal
 
-Split the work between a privileged **kperf helper** and an unprivileged **agent engine**, connected by a local socket.
+Split the work between a privileged **kperf helper** (a separate small binary, `asprof-kperf`) and an unprivileged **agent engine**, connected by a local socket.
 
 - The **helper** runs as root. It programs the PMU and kperf, reads the kdebug trace buffer, and streams compact raw samples (timestamp, thread, counter, return-address array) for the target pid only.
 - The **agent engine** runs inside the JVM. It consumes the stream on a dedicated thread, resolves each address array against the live JVM, and records the result as a `PERF_SAMPLE` via `Profiler::recordExternalSample`.
@@ -21,7 +21,7 @@ From the user's point of view:
 sudo asprof -e L1D_CACHE_MISS_LD_NONSPEC -i 20000 -d 30 -f out.html <pid>
 ```
 
-`asprof` already runs as root here and already knows how to attach to a JVM owned by another user. It forks the helper (keeping root) and then loads the agent as the target's user, passing the helper's socket path in the agent arguments.
+`asprof` already runs as root here and already knows how to attach to a JVM owned by another user. It launches `asprof-kperf` (which keeps root) and then loads the agent as the target's user, passing the helper's socket path in the agent arguments. The helper can also be started on its own, so `asprof` and the agent need no root-specific code beyond launching it.
 
 ## Key decisions
 
@@ -31,9 +31,11 @@ sudo asprof -e L1D_CACHE_MISS_LD_NONSPEC -i 20000 -d 30 -f out.html <pid>
 
 **Mirror an existing pattern: `J9StackTraces`.** That component already does almost exactly this. A background thread receives raw native PC arrays from outside the sampled thread, turns them into frames, and calls `recordExternalSample`. The new engine has the same shape, plus a code-cache-aware frame resolver in place of `convertNativeTrace`.
 
-**Mirror an existing pattern: `fdtransfer`.** On Linux, `asprof --fdtransfer` already runs a privileged helper that serves an unprivileged agent over a unix socket. The kperf helper should reuse its lifecycle: spawned by `asprof`, its path passed via an agent option, one target per helper. We can't pass fds here, but the process model, options and docs story are the same.
+**Mirror an existing pattern: `fdtransfer`.** On Linux, `asprof --fdtransfer` already runs a privileged helper that serves an unprivileged agent over a unix socket. The kperf helper should reuse its lifecycle: launched by `asprof`, its socket path passed via an agent option, one target per helper. We can't pass fds here, but the process model, options and docs story are the same.
 
 **Generic helper protocol, agent owns configuration.** The agent sends a start request carrying the event names and periods, and the helper validates them against its kpep database. That keeps event syntax and validation in one place (`-e`/`-i` parsing in the agent) and lets the helper reject anything beyond PMI sampling for the peer's own pid.
+
+**The helper is a separate binary.** Everything that runs as root (private-framework calls, kdebug reader, socket server) lives in one small, dependency-free executable that is easy to audit and to sign or notarize on its own. `asprof` itself never needs to touch kperf, and the helper doesn't carry the attach machinery or JVM knowledge.
 
 **Security boundary is the peer pid.** The helper samples only the pid of the connected peer, obtained with `getsockopt(LOCAL_PEERPID)`, which must match the pid `asprof` attached to. It ignores any pid in the request, and the socket lives in a directory only the target uid can enter. A compromised or curious JVM can therefore only profile itself.
 
@@ -45,6 +47,7 @@ The kernel gives `pc, ret1, ret2, ...` (leaf first), plus the interrupted LR as 
 
 - **Compiled nmethod:** unfold inlined scopes via `findScopeOffset`/`ScopeDesc`. Return addresses map exactly to a call-site `PcDesc`. The leaf PC maps to the nearest `PcDesc`, the same approximation `cstack=vm` makes today; `-XX:+DebugNonSafepoints` improves it.
 - **Leaf in an nmethod prologue/epilogue** (`!isFrameCompleteAt(pc)`): the frame record hasn't been pushed, so the kernel's walk skips the caller. Insert the fixup LR as the caller.
+- **Frameless native leaf:** no DWARF here, so start with a heuristic: insert the fixup LR as the caller if it lies outside the leaf function and isn't already `frames[1]`. Revisit if it misattributes in practice.
 - **Interpreter:** we only have the PC, not the frame pointer, so the `Method*` is unrecoverable. Emit a single `[interpreted]` frame. Hot code is compiled, so this matters mostly for startup.
 - **Stubs and adapters:** named via `findRuntimeStub` / the blob name, as `walkVM` does.
 - **Native:** `findNativeMethod`, with the usual marks applied, e.g. truncating at `MARK_INTERPRETER` is wrong here and must be skipped.
@@ -61,9 +64,10 @@ The sample is resolved milliseconds after it was taken, by which time code may h
 
 ## Supporting changes
 
-- **asprof:** a macOS kperf helper mode alongside `FdTransferServer`. It handles the kpep event database, kpc/kperf programming, the kdebug reader, the socket server and clean teardown on exit or signal (kperf and kdebug are global, single-owner state).
+- **`asprof-kperf`:** a new macOS-only binary, built and shipped next to `asprof` (it grows out of `kperf_sample.c`). It handles the kpep event database, kpc/kperf programming, the kdebug reader, the socket server and clean teardown on exit or signal (kperf and kdebug are global, single-owner state).
 - **Agent:** a `KperfEvents` engine selected for hardware event names on macOS. It holds the socket client, the thread-id map and the PC-array resolver.
 - **Event names:** accept kpep names directly (`L1D_CACHE_MISS_LD_NONSPEC`), plus aliases for the common Linux names (`cycles`, `instructions`, `cache-misses`, `branch-misses`), so existing command lines keep working.
+- **asprof:** launch `asprof-kperf` when a kperf event is requested on macOS and pass its socket path to the agent, as it does for fdtransfer.
 - **Docs:** a macOS section in `CpuSamplingEngines.md` covering root, `PreserveFramePointer` and the conflict with a concurrent Instruments/ktrace session.
 
 ## Prior art
@@ -85,6 +89,4 @@ The sample is resolved milliseconds after it was taken, by which time code may h
 
 ## Open questions
 
-- Should the helper live in `asprof` (simplest distribution, mirrors fdtransfer) or be a separate small binary that is easier to audit and sign?
-- How do we make the leaf-frame fixup robust for frameless native leaves without DWARF? Instruments uses a heuristic; is "insert LR if it lies outside the leaf function and isn't already `frames[1]`" good enough?
-- Is `PERF_SAMPLE` the right JFR event type, or should these get a distinct event carrying the kpep event name?
+- JFR event type: start by recording these as `PERF_SAMPLE`, the same as Linux hardware events, which needs no converter or viewer changes. If losing the kpep event name in JFR turns out to matter (e.g. for multi-event sessions), switch to a distinct event that carries it.
