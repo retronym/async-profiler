@@ -27,6 +27,7 @@
 #include "j9WallClock.h"
 #include "instrument.h"
 #include "itimer.h"
+#include "kperfEvents.h"
 #include "dwarf.h"
 #include "flameGraph.h"
 #include "flightRecorder.h"
@@ -65,6 +66,9 @@ static J9WallClock j9_wall_clock;
 static CTimer ctimer;
 static ITimer itimer;
 static Instrument instrument;
+#ifdef __APPLE__
+static KperfEvents kperf_events;
+#endif
 
 static ProfilingWindow profiling_window;
 
@@ -748,6 +752,11 @@ Engine* Profiler::selectEngine(Arguments& args) {
 
     if (event_name == NULL) {
         return &noop_engine;
+#ifdef __APPLE__
+    } else if (args._kperf_path != NULL && strcmp(event_name, EVENT_WALL) != 0 &&
+               strcmp(event_name, EVENT_ITIMER) != 0 && strcmp(event_name, EVENT_CTIMER) != 0) {
+        return &kperf_events;
+#endif
     } else if (strcmp(event_name, EVENT_CPU) == 0) {
         if (args._record_cpu || args._target_cpu != -1 || FdTransferClient::hasPeer() || PerfEvents::supported()) {
             return &perf_events;

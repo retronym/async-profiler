@@ -30,8 +30,13 @@ public class Workload {
     }
 
     static int chase(int p, int steps) {
-        for (int i = 0; i < steps; i++) p = next[p];
+        for (int i = 0; i < steps; i++) p = step(p);
         return p;
+    }
+
+    // Small enough to be inlined into chase(): exercises inlined frame resolution
+    static int step(int p) {
+        return next[p];
     }
 
     static long scan() {

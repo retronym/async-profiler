@@ -20,6 +20,7 @@ class StackWalker {
     static int walkDwarf(void* ucontext, const void** callchain, int max_depth);
     static int walkVM(void* ucontext, ASGCT_CallFrame* frames, int max_depth, int lock_index,
                       StackWalkFeatures features, EventType event_type);
+    static int resolveRaw(const uint64_t* pcs, int num_pcs, uint64_t fixup, ASGCT_CallFrame* frames, int max_depth);
 
     static void checkFault();
 };

@@ -18,7 +18,8 @@ const intptr_t MAX_INTERPRETER_FRAME_SIZE = 0x1000;
 const intptr_t DEAD_ZONE = 0x1000;
 
 static ucontext_t empty_ucontext{};
-static jmp_buf* crash_protection_ctx[CONCURRENCY_LEVEL];
+// The extra slot is reserved for resolveRaw, which runs on a single dedicated thread
+static jmp_buf* crash_protection_ctx[CONCURRENCY_LEVEL + 1];
 
 
 static inline bool aligned(uintptr_t ptr) {
@@ -502,6 +503,99 @@ int StackWalker::walkVM(void* ucontext, ASGCT_CallFrame* frames, int max_depth, 
     return depth;
 }
 
+// Direct-mapped cache of native PC -> symbol for resolveRaw. Only used from
+// the single resolver thread. Native code does not move, so entries stay valid
+// unless a library is unloaded, which this spike ignores.
+static const int NATIVE_CACHE_SIZE = 4096;
+static struct {
+    const void* pc;
+    const char* name;
+} native_cache[NATIVE_CACHE_SIZE];
+
+static const char* findNativeMethodCached(Profiler* profiler, const void* pc) {
+    unsigned int slot = ((uintptr_t)pc >> 2) * 2654435761u % NATIVE_CACHE_SIZE;
+    if (native_cache[slot].pc != pc) {
+        native_cache[slot].name = profiler->findNativeMethod(pc);
+        native_cache[slot].pc = pc;
+    }
+    return native_cache[slot].name;
+}
+
+// Resolves a stack captured outside the JVM (e.g. by the kernel on a PMU interrupt)
+// as a list of return addresses, leaf first, against the live code cache.
+// Unlike walkVM, there are no registers, so interpreted frames cannot be named.
+// `fixup` is the link register at the time of the sample: if it points outside
+// the leaf function and is not already the next frame, the leaf had not pushed
+// a frame record yet, and the fixup is its caller.
+int StackWalker::resolveRaw(const uint64_t* pcs, int num_pcs, uint64_t fixup, ASGCT_CallFrame* frames, int max_depth) {
+    Profiler* profiler = Profiler::instance();
+
+    jmp_buf current_ctx;
+    crash_protection_ctx[CONCURRENCY_LEVEL] = &current_ctx;
+
+    volatile int depth = 0;
+    if (setjmp(current_ctx) != 0) {
+        crash_protection_ctx[CONCURRENCY_LEVEL] = NULL;
+        if (depth < max_depth) {
+            fillFrame(frames[depth++], BCI_ERROR, "break_not_walkable");
+        }
+        return depth;
+    }
+
+    bool use_fixup = false;
+    if (num_pcs > 0 && fixup != 0 && (num_pcs < 2 || fixup != pcs[1])) {
+        const void* leaf = (const void*)pcs[0];
+        const void* lr = (const void*)fixup;
+        if (CodeHeap::contains(leaf)) {
+            NMethod* nm = CodeHeap::findNMethod(leaf);
+            use_fixup = nm != NULL && !nm->isInterpreter() && !nm->contains(lr);
+        } else {
+            const char* leaf_name = findNativeMethodCached(profiler, leaf);
+            use_fixup = leaf_name != NULL && leaf_name != findNativeMethodCached(profiler, lr);
+        }
+    }
+
+    for (int i = 0; i < num_pcs && depth < max_depth; i++) {
+        const void* pc = (const void*)pcs[i];
+        if (i == 1 && use_fixup) {
+            use_fixup = false;
+            pc = (const void*)fixup;
+            i--;
+        }
+
+        if (CodeHeap::contains(pc)) {
+            NMethod* nm = CodeHeap::findNMethod(pc);
+            if (nm == NULL) {
+                fillFrame(frames[depth++], BCI_ERROR, "unknown_nmethod");
+            } else if (nm->isInterpreter()) {
+                fillFrame(frames[depth++], BCI_ERROR, "interpreted");
+            } else if (nm->isNMethod()) {
+                int level = nm->level();
+                FrameTypeId type = level >= 1 && level <= 3 ? FRAME_C1_COMPILED : FRAME_JIT_COMPILED;
+                int scope_offset = nm->isFrameCompleteAt(pc) ? nm->findScopeOffset(pc) : -1;
+                if (scope_offset > 0) {
+                    ScopeDesc scope(nm);
+                    do {
+                        scope_offset = scope.decode(scope_offset);
+                        FrameTypeId t = scope_offset > 0 ? FRAME_INLINED : type;
+                        fillFrame(frames[depth++], t, scope.bci(), scope.method()->id());
+                    } while (scope_offset > 0 && depth < max_depth);
+                } else {
+                    fillFrame(frames[depth++], type, 0, nm->method()->id());
+                }
+            } else {
+                CodeBlob* stub = profiler->findRuntimeStub(pc);
+                fillFrame(frames[depth++], BCI_NATIVE_FRAME, stub != NULL ? stub->_name : nm->name());
+            }
+        } else {
+            fillFrame(frames[depth++], BCI_NATIVE_FRAME, findNativeMethodCached(profiler, pc));
+        }
+    }
+
+    crash_protection_ctx[CONCURRENCY_LEVEL] = NULL;
+    return depth;
+}
+
 void StackWalker::checkFault() {
     // Search for a crash protection context located on the current thread stack.
     // Since one thread may use multiple contexts because of simultaneous profiling engines,
@@ -510,7 +604,7 @@ void StackWalker::checkFault() {
     uintptr_t stack_distance = 32768;  // maximum allowed stack distance
     const uintptr_t current_sp = (uintptr_t)&nearest_ctx;
 
-    for (int i = 0; i < CONCURRENCY_LEVEL; i++) {
+    for (int i = 0; i <= CONCURRENCY_LEVEL; i++) {
         jmp_buf* ctx = crash_protection_ctx[i];
         if ((uintptr_t)ctx - current_sp < stack_distance) {
             nearest_ctx = ctx;
