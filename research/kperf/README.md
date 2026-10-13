@@ -179,7 +179,18 @@ The shuffle in `main` misses on its `next[j]` loads; with skid, ~15% of misses l
 | + `cache-misses`/`branch-misses` @100k / @10k, ×1 each | up to ~40k | 2.46 / 2.43 |
 
 - **The sampling period doesn't measurably change IPC.** 10x fewer PMIs moved IPC by ~2%, within run-to-run spread. Adding 230k miss PMIs didn't lower it either. The "kernel vs user-only" runs (both actually user-only) made no visible difference (2.25 vs 2.44 and 3.98 vs 3.89, single runs on two corpora).
-- **We read ~5% below xctrace, whatever the period.** Both tools sample `CORE_ACTIVE_CYCLE` and `INST_ALL`, and both are very likely user-only. The leading explanation is thread attribution. kperf counters run per CPU, so a PMI credited to the benchmark thread includes events from whatever else ran on that core since the last overflow (GC, other processes). That pulls the benchmark thread's IPC toward the machine average. xctrace uses exact per-thread counter deltas.
+- **The ~5% gap to xctrace was noise, not bias.** Both tools sample `CORE_ACTIVE_CYCLE` and `INST_ALL`, and both are very likely user-only. A later run on a quieter machine (1.8 cores of background load) gave a bench-thread IPC of 2.71, against xctrace's 2.73. kperf counters run per CPU, so a PMI credited to the benchmark thread includes events from whatever else ran on that core since the last overflow (GC, other processes). That pulls the benchmark thread's IPC toward the machine average. xctrace uses exact per-thread counter deltas.
+- **Per-thread check (`-t`).** Exact per-thread counts (kpc thread counting plus the `PMC_THREAD` sampler) vs PMI attribution, in the measured window:
+
+| | exact | PMI-attributed |
+|---|---|---|
+| bench thread IPC | 2.686 | 2.707 |
+| process IPC | 2.630 | 2.641 |
+| process cycles / instructions | 7.05e10 / 1.85e11 | 96.1% / 96.5% of exact |
+
+  - Crediting each PMI's whole period to the thread running at overflow is unbiased: per-thread IPC agrees within 1%.
+  - The helper misses some events: 3.5–4% in the measured window, and 9–12% during JIT-heavy warmup. Cycles and instructions lose about equally, so ratios hold. Likely lost or unmatched samples (e.g. kdebug buffer overflow); not yet diagnosed.
+  - The fixed counters (0/1) count 4.9% more cycles and 2.7% more instructions than the user-only configurable counters (IPC 2.575 vs 2.630). They apparently include kernel mode, which can't be enabled on the configurable counters.
 - **Earlier "low IPC" figures were mostly noise and conditions:** single runs, JDK 21 vs 25, shorter warmup, background load.
 - **JMH's async-profiler integration starts the profiler twice:** at the first warmup iteration, and again (`stop`, `start`) at the first measured iteration. Each fork therefore shows two helper sessions, and the second is the measured window.
 
@@ -193,5 +204,5 @@ The shuffle in `main` misses on its `next[j]` loads; with skid, ~15% of misses l
 6. **Verify the method at resolve time,** e.g. check it is still live at the sample's timestamp, or track compiled-method load and unload events.
 7. **Cheaper thread-id mapping.** Look up only the missing thread instead of re-listing all of them.
 8. **Kernel stacks** (`KPERF_SAMPLER_KSTACK`): cheap to collect, but need kernel symbolication.
-9. **Close the IPC gap to xctrace.** Try per-thread counting (`kpc_set_thread_counting`) to remove cross-thread contamination of PMI weights.
+9. ~~Close the IPC gap to xctrace~~ (noise; attribution verified with `-t`). Remaining: find where 4–12% of PMIs are lost (kdebug overflow? unmatched `PERF_KPC_HNDLR`/`PERF_GEN_EVENT` pairs), and report lost events. Exact per-thread counts could also weight ratios directly instead of PMI counts.
 10. **Upstream hygiene:** automated tests gated on root and real hardware; docs in `CpuSamplingEngines.md`; signing and notarizing `asprof-kperf`; Intel Mac testing; a launchd-daemon option to avoid `sudo` per session.
