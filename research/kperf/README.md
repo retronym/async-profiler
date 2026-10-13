@@ -189,7 +189,8 @@ The shuffle in `main` misses on its `next[j]` loads; with skid, ~15% of misses l
 | process cycles / instructions | 7.05e10 / 1.85e11 | 96.1% / 96.5% of exact |
 
   - Crediting each PMI's whole period to the thread running at overflow is unbiased: per-thread IPC agrees within 1%.
-  - The helper misses some events: 3.5–4% in the measured window, and 9–12% during JIT-heavy warmup. Cycles and instructions lose about equally, so ratios hold. Likely lost or unmatched samples (e.g. kdebug buffer overflow); not yet diagnosed.
+  - In that run the helper missed some events: 3.5–4% in the measured window, and 9–12% during JIT-heavy warmup. Cycles and instructions lost about equally, so ratios held.
+  - A rerun with loss diagnostics lost nothing: PMI-attributed counts were 99.9–100.4% of exact. That run had no kdebug lost-events markers and no unmatched PMIs on our threads. Weighting each PMI by its actual counter delta (the cumulative count in `PERF_KPC_HNDLR`) gave exactly 100% of PMIs × period, so overflows are never late or coalesced. The earlier loss was most likely kdebug buffer wrap, which drops PMI records while the exact counts (first/last snapshots) survive. The earlier build couldn't report it, and the helper now prints lost-events markers every session.
   - The fixed counters (0/1) count 4.9% more cycles and 2.7% more instructions than the user-only configurable counters (IPC 2.575 vs 2.630). They apparently include kernel mode, which can't be enabled on the configurable counters.
 - **Earlier "low IPC" figures were mostly noise and conditions:** single runs, JDK 21 vs 25, shorter warmup, background load.
 - **JMH's async-profiler integration starts the profiler twice:** at the first warmup iteration, and again (`stop`, `start`) at the first measured iteration. Each fork therefore shows two helper sessions, and the second is the measured window.
@@ -204,5 +205,5 @@ The shuffle in `main` misses on its `next[j]` loads; with skid, ~15% of misses l
 6. **Verify the method at resolve time,** e.g. check it is still live at the sample's timestamp, or track compiled-method load and unload events.
 7. **Cheaper thread-id mapping.** Look up only the missing thread instead of re-listing all of them.
 8. **Kernel stacks** (`KPERF_SAMPLER_KSTACK`): cheap to collect, but need kernel symbolication.
-9. ~~Close the IPC gap to xctrace~~ (noise; attribution verified with `-t`). Remaining: find where 4–12% of PMIs are lost (kdebug overflow? unmatched `PERF_KPC_HNDLR`/`PERF_GEN_EVENT` pairs), and report lost events. Exact per-thread counts could also weight ratios directly instead of PMI counts.
+9. ~~Close the IPC gap to xctrace~~ (noise; attribution verified with `-t`). Lost PMIs are now reported (kdebug wrap markers, unmatched PMIs). Remaining: if wrap recurs, enlarge the kdebug buffer or read more often, and forward a lost-events count to the agent. Exact per-thread counts could also weight ratios directly instead of PMI counts.
 10. **Upstream hygiene:** automated tests gated on root and real hardware; docs in `CpuSamplingEngines.md`; signing and notarizing `asprof-kperf`; Intel Mac testing; a launchd-daemon option to avoid `sudo` per session.
