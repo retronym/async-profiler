@@ -144,8 +144,10 @@ typedef struct {
 #define KPC_USER_COUNTING      0x04
 #define KPC_CAPTURED_PC        0x08
 
-// arm64 kpc config word: counting modes (XNU osfmk/arm64/kpc.c). All zero means all modes.
+// arm64 kpc config word: counting modes (XNU osfmk/arm64/kpc.c). All zero gives user-only
+// on macOS 27 / M5 (read back as EL0A64, PMI flags show user counting only).
 #define CFGWORD_EL0A64EN_MASK  0x20000
+#define CFGWORD_EL1EN_MASK     0x40000
 #define CFGWORD_ALLMODES_MASK  0xf0000
 
 static int kdCtl(int op, int arg, void* buf, size_t* len) {
@@ -369,14 +371,14 @@ static int startSampling(pid_t pid, const struct KperfRequest* req, struct Kperf
             }
         }
     }
-    // Mode bits all zero means all modes: clear kpep's for kernel counting rather than trusting its default
+    // Set the mode bits explicitly: all zero (kpep's default) counts user mode only
     bool kernel = (req->flags & KPERF_REQ_KERNEL_COUNTING) != 0;
     uint64_t kpep_modes[KPC_MAX_COUNTERS] = {0};
     for (uint32_t c = 0; c < nconfig; c++) {
         if (regs[c] == 0) continue;
         kpep_modes[c] = regs[c] & CFGWORD_ALLMODES_MASK;
         regs[c] &= ~(uint64_t)CFGWORD_ALLMODES_MASK;
-        if (!kernel) regs[c] |= CFGWORD_EL0A64EN_MASK;
+        regs[c] |= CFGWORD_EL0A64EN_MASK | (kernel ? CFGWORD_EL1EN_MASK : 0);
     }
     for (uint32_t i = 0; i < req->num_events; i++) {
         if (resp->counter[i] == 0) {
