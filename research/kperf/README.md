@@ -146,6 +146,44 @@ The shuffle in `main` misses on its `next[j]` loads; with skid, ~15% of misses l
 - `-e cycles+cache-misses+instructions` (up to 4, optional `@period` each) runs in one session on separate PMCs; the stack root carries the event name. The per-event profiles match the single-event runs.
 - A second `asprof -e cycles` while the helper server was sampling another JVM failed cleanly: `asprof-kperf: PMU counters are reserved by another process (Instruments, xctrace or another profiler?)`, exit status 200.
 
+## Counting mode, sampling overhead and IPC vs xctrace
+
+**Question.** The scalac runs measured lower IPC than xctrace. Is our own sampling the cause? Two theories: the kernel's work for each sample (PMI handler, AST-time stack walk) is counted and attributed to the sampled thread, or the interrupts disturb caches and branch predictors for the user code.
+
+**Counting mode.**
+
+- Counters now count user mode only by default. The helper sets EL0 A64 in each config word. `KPERF_KERNEL=1` in the agent, or `-k` on the helper, counts all modes.
+- kpep's own config words carry no mode bits, i.e. all modes. So the earlier runs counted user+kernel.
+- XNU reports each PMI's counting mode in the `PERF_KPC_HNDLR` desc flags: `0x2` kernel counting, `0x4` user counting, `0x8` captured PC. The helper prints their union per event. User-only runs show `0x4` (`0xc` with PC capture), as expected. `-k` has not yet been run with this logging, so it is not confirmed that kernel counting actually takes effect. In every run so far, with and without kernel counting, 0.0% of PMIs had `KPC_KERNEL_PC`.
+- `kpc_get_config` read-back is unreliable: PMC 5/6 read back `0` whatever was set. The PMI flags are the trustworthy signal.
+
+**Synthetic workload** (`overhead.sh`, `Workload`, 15 s, DRAM-bound, IPC 0.25):
+
+| run | PMIs/s | rounds/s | IPC |
+|---|---|---|---|
+| no profiler | — | 3.40 | — |
+| 4 events, default periods, user / user+kernel | ~7.6k | 3.38 / 3.30 | 0.25 / 0.25 |
+| 4 events, `cycles@100000…@1000`, user / user+kernel | ~69k | 2.97 / 3.05 | 0.31 / 0.31 |
+
+- At ~70k PMIs/s throughput drops 10–13%, about 1.5 µs per PMI including its stack walk.
+- IPC *rises*, because counted cycles drop (72G → 59G) while instructions don't: time spent handling PMIs is not counted. At high rates, user-mode IPC is overstated rather than depressed. This workload is DRAM-bound, so it can't show cache or predictor pollution.
+
+**scalac** (dotc `CompileBenchmark`, `dottyUtil`, JDK 25, JMH 1 fork, 4×3 s measured, ~2.5–3 cores of background load; IPC on the benchmark thread):
+
+| run | PMIs/s (measured window) | IPC |
+|---|---|---|
+| xctrace ipc template (JMH's), ×3 | — | 2.73 (2.64–2.82) |
+| `cycles+instructions`, 1M, ×3 interleaved | ~20k | 2.56 (2.52–2.59) |
+| `cycles@10000000+instructions@10000000`, ×3 interleaved | ~2k | 2.60 (2.56–2.70) |
+| + `cache-misses`/`branch-misses` @100k / @10k, ×1 each | up to ~40k | 2.46 / 2.43 |
+
+- **The sampling period doesn't measurably change IPC.** 10x fewer PMIs moved IPC by ~2%, within run-to-run spread. Adding 230k miss PMIs didn't lower it either. Kernel vs user-only counting made no visible difference (2.25 vs 2.44 and 3.98 vs 3.89, single runs on two corpora).
+- **We read ~5% below xctrace, whatever the period.** Both tools sample `CORE_ACTIVE_CYCLE` and `INST_ALL`. There are two candidate explanations:
+  - The xctrace template's counting mode, which hasn't been decoded.
+  - Thread attribution. kperf counters run per CPU, so a PMI credited to the benchmark thread includes events from whatever else ran on that core since the last overflow (GC, other processes). That pulls the benchmark thread's IPC toward the machine average. xctrace uses exact per-thread counter deltas.
+- **Earlier "low IPC" figures were mostly noise and conditions:** single runs, JDK 21 vs 25, shorter warmup, background load.
+- **JMH's async-profiler integration starts the profiler twice:** at the first warmup iteration, and again (`stop`, `start`) at the first measured iteration. Each fork therefore shows two helper sessions, and the second is the measured window.
+
 ## Future work
 
 1. ~~Precise PC capture~~, ~~event-aware allocation~~, ~~per-event capture rates~~ (done). Remaining: for branch mispredicts, use a precise PC that is outside the leaf function as an extra leaf frame instead of dropping it.
@@ -156,4 +194,5 @@ The shuffle in `main` misses on its `next[j]` loads; with skid, ~15% of misses l
 6. **Verify the method at resolve time,** e.g. check it is still live at the sample's timestamp, or track compiled-method load and unload events.
 7. **Cheaper thread-id mapping.** Look up only the missing thread instead of re-listing all of them.
 8. **Kernel stacks** (`KPERF_SAMPLER_KSTACK`): cheap to collect, but need kernel symbolication.
+9. **Close the IPC gap to xctrace.** Run `-k` with the PMI-flag logging to confirm kernel counting takes effect (expect flag `0x2`). Decode the xctrace template's counting mode. Try per-thread counting (`kpc_set_thread_counting`) to remove cross-thread contamination of PMI weights.
 10. **Upstream hygiene:** automated tests gated on root and real hardware; docs in `CpuSamplingEngines.md`; signing and notarizing `asprof-kperf`; Intel Mac testing; a launchd-daemon option to avoid `sudo` per session.
