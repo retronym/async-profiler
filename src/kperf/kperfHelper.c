@@ -10,6 +10,7 @@
  * that process. See research/kperf/DESIGN.md.
  *
  * Usage: sudo asprof-kperf -s <socket path> [-u <uid>]   serve any number of agents
+ *        add -k to count kernel mode too, whatever the agent asks for
  *        sudo asprof-kperf -s <socket path> -p <pid>    serve exactly one session for <pid>
  *
  * The helper only ever samples the pid of the connected socket peer. In the
@@ -67,6 +68,7 @@ static int (*kpc_force_all_ctrs_get)(int*);
 static int (*kpc_set_counting)(uint32_t);
 static int (*kpc_set_thread_counting)(uint32_t);
 static int (*kpc_set_config)(uint32_t, uint64_t*);
+static int (*kpc_get_config)(uint32_t, uint64_t*);
 static int (*kpc_set_period)(uint32_t, uint64_t*);
 static int (*kpc_set_actionid)(uint32_t, uint32_t*);
 static uint32_t (*kpc_get_counter_count)(uint32_t);
@@ -101,6 +103,7 @@ static bool loadFrameworks(void) {
     LOAD(kperf, kperf_action_count_set) LOAD(kperf, kperf_action_count_get)
     LOAD(kperf, kperf_action_samplers_set) LOAD(kperf, kperf_action_filter_set_by_pid)
     LOAD(kperf, kperf_sample_set) LOAD(kperf, kperf_reset)
+    *(void**)&kpc_get_config = dlsym(kperf, "kpc_get_config");  // optional, diagnostics only
     LOAD(kpep, kpep_db_create) LOAD(kpep, kpep_db_free) LOAD(kpep, kpep_db_event) LOAD(kpep, kpep_config_create)
     LOAD(kpep, kpep_config_free) LOAD(kpep, kpep_config_force_counters) LOAD(kpep, kpep_config_add_event)
     LOAD(kpep, kpep_config_kpc)
@@ -364,10 +367,14 @@ static int startSampling(pid_t pid, const struct KperfRequest* req, struct Kperf
             }
         }
     }
-    if (!(req->flags & KPERF_REQ_KERNEL_COUNTING)) {
-        for (uint32_t c = 0; c < nconfig; c++) {
-            if (regs[c] != 0) regs[c] = (regs[c] & ~(uint64_t)CFGWORD_ALLMODES_MASK) | CFGWORD_EL0A64EN_MASK;
-        }
+    // Mode bits all zero means all modes: clear kpep's for kernel counting rather than trusting its default
+    bool kernel = (req->flags & KPERF_REQ_KERNEL_COUNTING) != 0;
+    uint64_t kpep_modes[KPC_MAX_COUNTERS] = {0};
+    for (uint32_t c = 0; c < nconfig; c++) {
+        if (regs[c] == 0) continue;
+        kpep_modes[c] = regs[c] & CFGWORD_ALLMODES_MASK;
+        regs[c] &= ~(uint64_t)CFGWORD_ALLMODES_MASK;
+        if (!kernel) regs[c] |= CFGWORD_EL0A64EN_MASK;
     }
     for (uint32_t i = 0; i < req->num_events; i++) {
         if (resp->counter[i] == 0) {
@@ -391,6 +398,15 @@ static int startSampling(pid_t pid, const struct KperfRequest* req, struct Kperf
         r = errno ? errno : EINVAL;
         snprintf(msg, msglen, "Cannot program kperf: %s", strerror(r));
         goto out;
+    }
+    for (uint32_t c = 0; c < nconfig; c++) {
+        if (regs[c] == 0) continue;
+        uint64_t readback[KPC_MAX_COUNTERS] = {0};
+        bool have_readback = kpc_get_config != NULL && kpc_get_config(KPC_CLASS_CONFIGURABLE_MASK, readback) == 0;
+        fprintf(stderr, "  PMC%u config 0x%llx: modes kpep 0x%llx, set 0x%llx, read back %s0x%llx\n", c + nfixed,
+                (unsigned long long)regs[c], (unsigned long long)kpep_modes[c] >> 16,
+                (unsigned long long)(regs[c] & CFGWORD_ALLMODES_MASK) >> 16, have_readback ? "" : "(unavailable) ",
+                (unsigned long long)(readback[c] & CFGWORD_ALLMODES_MASK) >> 16);
     }
     if (kdebugSetup(1 << 20)) {
         r = errno ? errno : EBUSY;
@@ -597,6 +613,7 @@ static bool readFully(int fd, void* buf, size_t len) {
 }
 
 static bool verbose = true;
+static bool force_kernel = false;
 
 static void serveClient(pid_t expected_pid) {
     pid_t pid = 0;
@@ -616,6 +633,7 @@ static void serveClient(pid_t expected_pid) {
         return;
     }
     for (uint32_t i = 0; i < KPERF_MAX_EVENTS; i++) req.events[i].name[KPERF_EVENT_LEN - 1] = 0;
+    if (force_kernel) req.flags |= KPERF_REQ_KERNEL_COUNTING;
 
     struct KperfResponse resp;
     memset(&resp, 0, sizeof(resp));
@@ -685,16 +703,17 @@ int main(int argc, char** argv) {
     uid_t uid = getenv("SUDO_UID") ? (uid_t)atoi(getenv("SUDO_UID")) : getuid();
     pid_t target_pid = 0;
     int opt;
-    while ((opt = getopt(argc, argv, "s:u:p:")) != -1) {
+    while ((opt = getopt(argc, argv, "s:u:p:k")) != -1) {
         switch (opt) {
             case 's': path = optarg; break;
             case 'u': uid = (uid_t)atoi(optarg); break;
             case 'p': target_pid = (pid_t)atoi(optarg); break;
+            case 'k': force_kernel = true; break;
             default: path = NULL; optind = argc; break;
         }
     }
     if (path == NULL) {
-        fprintf(stderr, "Usage: sudo %s -s <socket path> [-u <uid> | -p <pid>]\n", argv[0]);
+        fprintf(stderr, "Usage: sudo %s -s <socket path> [-u <uid> | -p <pid>] [-k]\n", argv[0]);
         return 1;
     }
     if (!loadFrameworks()) return 1;
