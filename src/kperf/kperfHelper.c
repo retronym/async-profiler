@@ -138,6 +138,8 @@ typedef struct {
 #define PERF_CS_UHDR    KDBG_EVENTID(DBG_PERF, 2, 6)
 #define PERF_KPC_HNDLR  KDBG_EVENTID(DBG_PERF, 6, 0)
 #define PERF_KPC_DATA_THREAD KDBG_EVENTID(DBG_PERF, 6, 8)
+// Synthesized by the kdebug reader when storage units were stolen (buffer wrapped)
+#define TRACE_LOST_EVENTS KDBG_EVENTID(7, 2, 2)
 #define CALLSTACK_VALID (1u << 0)
 #define SAMPLE_FLAG_PEND_USER (1u << 0)
 #define KPC_DESC_COUNTER(desc) (((desc) >> 32) & 0xffff)
@@ -298,6 +300,7 @@ static bool eventConfig(kpep_db* db, const char* name, uint32_t* mask, uint64_t*
 // PMC_THREAD sampler, so each sample also logs the thread's exact cumulative
 // counts, indexed by absolute PMC. Used to check PMI attribution per thread.
 static bool thread_counts = false;
+static uint64_t event_period[KPERF_MAX_EVENTS];
 static uint32_t num_thread_ctrs;
 
 // Programs one configurable PMC per event to raise a PMI every `period` events,
@@ -376,6 +379,7 @@ static int startSampling(pid_t pid, const struct KperfRequest* req, struct Kperf
                 counter_event[c] = (int)i;
                 regs[c - nfixed] = configs[i];
                 periods[c - nfixed] = req->events[i].period;
+                event_period[i] = req->events[i].period;
                 actions[c - nfixed] = 1;
                 break;
             }
@@ -464,6 +468,7 @@ typedef struct {
     uint64_t tid;
     uint64_t desc;
     uint64_t pc;
+    uint64_t delta;  // events since the previous PMI of this counter on this CPU, 0 if unknown
 } CpuPmi;
 
 #define MAX_PENDING 1024
@@ -478,8 +483,13 @@ static int client_fd = -1;
 
 static struct {
     uint64_t pmis, kernel_pmis, stacks, precise, flags_seen;
+    uint64_t weight;     // sum of the matched PMIs' actual counter deltas (period where unknown)
+    uint64_t unmatched;  // PMIs on our threads that kperf never sampled
+
 } stats[KPERF_MAX_EVENTS];
 static uint64_t unattributed;
+static uint64_t lost_markers, orphan_samples;
+static uint64_t cpu_last_count[MAX_CPUS][KPC_MAX_COUNTERS];
 
 // Per-thread exact counts (first and last PMC_THREAD vector) and PMIs attributed by event
 typedef struct {
@@ -557,8 +567,9 @@ static void reportThreadCounts(const struct KperfRequest* req, const struct Kper
     }
     fprintf(stderr, "  Per-thread counts (%d threads; exact = thread counter deltas between its first and last sample):\n", n);
     for (uint32_t i = 0; i < req->num_events; i++) {
-        fprintf(stderr, "    %-32s exact %.4g, PMI-attributed %.4g (%.1f%%)\n", req->events[i].name, exact[i], attributed[i],
-                exact[i] > 0 ? 100.0 * attributed[i] / exact[i] : 0.0);
+        fprintf(stderr, "    %-32s exact %.4g, PMI-attributed %.4g (%.1f%%), by counter deltas %.4g (%.1f%%)\n",
+                req->events[i].name, exact[i], attributed[i], exact[i] > 0 ? 100.0 * attributed[i] / exact[i] : 0.0,
+                (double)stats[i].weight, exact[i] > 0 ? 100.0 * stats[i].weight / exact[i] : 0.0);
     }
     fprintf(stderr, "    fixed counters 0/1: %.4g / %.4g (IPC %.3f)\n", fixed[0], fixed[1], fixed[0] > 0 ? fixed[1] / fixed[0] : 0.0);
     if (cyc < 0 || ins < 0) return;
@@ -646,12 +657,35 @@ static Pending* pendingFor(uint64_t tid) {
     return p;
 }
 
+static bool knownThread(uint64_t tid) {
+    for (int i = 0; i < num_pending; i++) {
+        if (pending[i].tid == tid) return true;
+    }
+    return false;
+}
+
 static bool handleEvent(const kd_buf* e) {
     uint32_t id = e->debugid & DEBUGID_MASK;
-    if (id == PERF_KPC_HNDLR && (e->debugid & DBG_FUNC_START)) {
-        // PMI on any process: desc, counter value, PC (precise if captured)
+    if (e->debugid == TRACE_LOST_EVENTS) {
+        lost_markers++;
+    } else if (id == PERF_KPC_HNDLR && (e->debugid & DBG_FUNC_START)) {
+        // PMI on any process: desc, the counter's cumulative count on this CPU, PC (precise if captured)
         if (e->cpuid < MAX_CPUS) {
-            cpu_pmi[e->cpuid] = (CpuPmi){e->arg5, e->arg1, e->arg3};
+            CpuPmi* prev = &cpu_pmi[e->cpuid];
+            if (prev->desc != 0 && knownThread(prev->tid)) {
+                // The previous PMI on this CPU was on one of our threads, but kperf didn't sample it
+                uint32_t pctr = (uint32_t)KPC_DESC_COUNTER(prev->desc);
+                int pev = pctr < KPC_MAX_COUNTERS ? counter_event[pctr] : -1;
+                if (pev >= 0) stats[pev].unmatched++;
+            }
+            uint32_t ctr = (uint32_t)KPC_DESC_COUNTER(e->arg1);
+            uint64_t delta = 0;
+            if (ctr < KPC_MAX_COUNTERS) {
+                uint64_t* last = &cpu_last_count[e->cpuid][ctr];
+                if (*last != 0 && e->arg2 > *last) delta = e->arg2 - *last;
+                *last = e->arg2;
+            }
+            *prev = (CpuPmi){e->arg5, e->arg1, e->arg3, delta};
         }
     } else if (id == PERF_GEN_EVENT && (e->debugid & DBG_FUNC_START) && (e->arg4 & SAMPLE_FLAG_PEND_USER)) {
         // kperf sampled in interrupt context: the PMI passed the pid filter
@@ -666,12 +700,15 @@ static bool handleEvent(const kd_buf* e) {
                 stats[event].pmis++;
                 if (KPC_DESC_FLAGS(pmi->desc) & KPC_KERNEL_PC) stats[event].kernel_pmis++;
                 stats[event].flags_seen |= KPC_DESC_FLAGS(pmi->desc);
+                stats[event].weight += pmi->delta ? pmi->delta : event_period[event];
                 if (thread_counts) {
                     ThreadCounts* t = threadFor(e->arg5);
                     if (t != NULL) t->pmis[event]++;
                 }
             }
             pmi->desc = 0;
+        } else {
+            orphan_samples++;
         }
     } else if (id == PERF_KPC_DATA_THREAD) {
         threadData(e);
@@ -776,6 +813,8 @@ static void serveClient(pid_t expected_pid) {
     memset(&stats, 0, sizeof(stats));
     if (threads != NULL) memset(threads, 0, THREAD_SLOTS * sizeof(ThreadCounts));
     unattributed = 0;
+    lost_markers = orphan_samples = 0;
+    memset(cpu_last_count, 0, sizeof(cpu_last_count));
     memset(cpu_pmi, 0, sizeof(cpu_pmi));
     num_pending = 0;
     outlen = 0;
@@ -806,7 +845,12 @@ static void serveClient(pid_t expected_pid) {
                     (unsigned long long)stats[i].flags_seen,
                     (unsigned long long)stats[i].stacks, (unsigned long long)stats[i].precise,
                     stats[i].stacks ? 100.0 * stats[i].precise / stats[i].stacks : 0.0);
+            fprintf(stderr, "  %-32s       weight by counter deltas %.1f%% of PMIs x period, %llu unmatched PMIs on our threads\n", "",
+                    stats[i].pmis ? 100.0 * stats[i].weight / ((double)stats[i].pmis * req.events[i].period) : 0.0,
+                    (unsigned long long)stats[i].unmatched);
         }
+        fprintf(stderr, "  kdebug lost-events markers: %llu, samples without a PMI: %llu\n",
+                (unsigned long long)lost_markers, (unsigned long long)orphan_samples);
         if (thread_counts) reportThreadCounts(&req, &resp);
     }
 }
