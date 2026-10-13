@@ -11,6 +11,7 @@
  *
  * Usage: sudo asprof-kperf -s <socket path> [-u <uid>]   serve any number of agents
  *        add -k to count kernel mode too, whatever the agent asks for
+ *        add -t to also log exact per-thread counts and compare them with PMI attribution
  *        sudo asprof-kperf -s <socket path> -p <pid>    serve exactly one session for <pid>
  *
  * The helper only ever samples the pid of the connected socket peer. In the
@@ -44,6 +45,7 @@
 #define KPC_MAX_COUNTERS            32
 #define KPERF_SAMPLER_TH_INFO       (1u << 0)
 #define KPERF_SAMPLER_USTACK        (1u << 3)
+#define KPERF_SAMPLER_PMC_THREAD    (1u << 4)
 
 
 typedef struct kpep_db kpep_db;
@@ -135,6 +137,7 @@ typedef struct {
 #define PERF_CS_UDATA   KDBG_EVENTID(DBG_PERF, 2, 4)
 #define PERF_CS_UHDR    KDBG_EVENTID(DBG_PERF, 2, 6)
 #define PERF_KPC_HNDLR  KDBG_EVENTID(DBG_PERF, 6, 0)
+#define PERF_KPC_DATA_THREAD KDBG_EVENTID(DBG_PERF, 6, 8)
 #define CALLSTACK_VALID (1u << 0)
 #define SAMPLE_FLAG_PEND_USER (1u << 0)
 #define KPC_DESC_COUNTER(desc) (((desc) >> 32) & 0xffff)
@@ -291,6 +294,12 @@ static bool eventConfig(kpep_db* db, const char* name, uint32_t* mask, uint64_t*
     return true;
 }
 
+// -t: per-thread counter virtualization (kpc_set_thread_counting) plus kperf's
+// PMC_THREAD sampler, so each sample also logs the thread's exact cumulative
+// counts, indexed by absolute PMC. Used to check PMI attribution per thread.
+static bool thread_counts = false;
+static uint32_t num_thread_ctrs;
+
 // Programs one configurable PMC per event to raise a PMI every `period` events,
 // all bound to kperf action 1 which samples the user stack of `pid`. Events go
 // on the PC-capturing PMCs first, unless the request opts out.
@@ -323,6 +332,7 @@ static int startSampling(pid_t pid, const struct KperfRequest* req, struct Kperf
     }
     uint32_t nfixed = kpc_get_counter_count(KPC_CLASS_FIXED_MASK);
     uint32_t nconfig = kpc_get_config_count(KPC_CLASS_CONFIGURABLE_MASK);
+    num_thread_ctrs = nfixed + nconfig;
     if (nconfig == 0 || nfixed + nconfig > KPC_MAX_COUNTERS) {
         snprintf(msg, msglen, "Unexpected PMU layout: %u fixed, %u configurable", nfixed, nconfig);
         goto out;
@@ -397,7 +407,9 @@ static int startSampling(pid_t pid, const struct KperfRequest* req, struct Kperf
         kpc_set_period(KPC_CLASS_CONFIGURABLE_MASK, periods) ||
         kpc_set_actionid(KPC_CLASS_CONFIGURABLE_MASK, actions) ||
         kperf_action_count_set(nactions > 1 ? nactions : 1) ||
-        kperf_action_samplers_set(1, KPERF_SAMPLER_USTACK | KPERF_SAMPLER_TH_INFO) ||
+        (thread_counts && kpc_set_thread_counting(KPC_CLASS_FIXED_MASK | KPC_CLASS_CONFIGURABLE_MASK)) ||
+        kperf_action_samplers_set(1, KPERF_SAMPLER_USTACK | KPERF_SAMPLER_TH_INFO |
+                                         (thread_counts ? KPERF_SAMPLER_PMC_THREAD : 0)) ||
         kperf_action_filter_set_by_pid(1, pid)) {
         r = errno ? errno : EINVAL;
         snprintf(msg, msglen, "Cannot program kperf: %s", strerror(r));
@@ -468,6 +480,101 @@ static struct {
     uint64_t pmis, kernel_pmis, stacks, precise, flags_seen;
 } stats[KPERF_MAX_EVENTS];
 static uint64_t unattributed;
+
+// Per-thread exact counts (first and last PMC_THREAD vector) and PMIs attributed by event
+typedef struct {
+    uint64_t tid;
+    uint64_t cur[KPC_MAX_COUNTERS], first[KPC_MAX_COUNTERS], last[KPC_MAX_COUNTERS];
+    uint32_t have;
+    bool started, seen;
+    uint64_t pmis[KPERF_MAX_EVENTS];
+} ThreadCounts;
+
+#define THREAD_SLOTS 8192
+static ThreadCounts* threads;  // open addressing by tid
+
+static ThreadCounts* threadFor(uint64_t tid) {
+    if (threads == NULL && (threads = calloc(THREAD_SLOTS, sizeof(ThreadCounts))) == NULL) return NULL;
+    for (uint32_t i = 0, h = (uint32_t)(tid * 0x9e3779b97f4a7c15ULL >> 51); i < THREAD_SLOTS; i++, h = (h + 1) % THREAD_SLOTS) {
+        if (threads[h].tid == tid) return &threads[h];
+        if (threads[h].tid == 0) {
+            threads[h].tid = tid;
+            return &threads[h];
+        }
+    }
+    return NULL;
+}
+
+static void threadData(const kd_buf* e) {
+    ThreadCounts* t = threadFor(e->arg5);
+    if (t == NULL) return;
+    if (e->debugid & DBG_FUNC_START) {
+        t->have = 0;
+        t->started = true;
+    }
+    if (!t->started) return;
+    uint64_t a[4] = {e->arg1, e->arg2, e->arg3, e->arg4};
+    for (int i = 0; i < 4 && t->have < num_thread_ctrs && t->have < KPC_MAX_COUNTERS; i++) t->cur[t->have++] = a[i];
+    if (t->have < num_thread_ctrs) return;
+    t->started = false;
+    bool zero = true;
+    for (uint32_t i = 0; i < num_thread_ctrs; i++) zero &= t->cur[i] == 0;
+    if (zero) return;  // the thread's counter buffer isn't allocated yet
+    if (!t->seen) memcpy(t->first, t->cur, sizeof(t->cur));
+    memcpy(t->last, t->cur, sizeof(t->cur));
+    t->seen = true;
+}
+
+static int byCycles_pmc;
+static int compareThreads(const void* a, const void* b) {
+    const ThreadCounts* x = *(ThreadCounts* const*)a;
+    const ThreadCounts* y = *(ThreadCounts* const*)b;
+    uint64_t dx = x->last[byCycles_pmc] - x->first[byCycles_pmc], dy = y->last[byCycles_pmc] - y->first[byCycles_pmc];
+    return dx < dy ? 1 : dx > dy ? -1 : 0;
+}
+
+// Exact counts vs PMI-attributed counts (PMIs x period), per event over all threads,
+// then for the busiest threads; and IPC both ways if cycles and instructions were sampled
+static void reportThreadCounts(const struct KperfRequest* req, const struct KperfResponse* resp) {
+    if (threads == NULL) return;
+    int cyc = -1, ins = -1;
+    for (uint32_t i = 0; i < req->num_events; i++) {
+        if (strcmp(req->events[i].name, "CORE_ACTIVE_CYCLE") == 0) cyc = (int)i;
+        if (strcmp(req->events[i].name, "INST_ALL") == 0) ins = (int)i;
+    }
+    ThreadCounts* list[THREAD_SLOTS];
+    int n = 0;
+    double exact[KPERF_MAX_EVENTS] = {0}, attributed[KPERF_MAX_EVENTS] = {0}, fixed[2] = {0};
+    for (int h = 0; h < THREAD_SLOTS; h++) {
+        ThreadCounts* t = &threads[h];
+        if (t->tid == 0 || !t->seen) continue;
+        list[n++] = t;
+        for (uint32_t i = 0; i < req->num_events; i++) {
+            exact[i] += (double)(t->last[resp->counter[i]] - t->first[resp->counter[i]]);
+            attributed[i] += (double)t->pmis[i] * req->events[i].period;
+        }
+        for (int f = 0; f < 2; f++) fixed[f] += (double)(t->last[f] - t->first[f]);
+    }
+    fprintf(stderr, "  Per-thread counts (%d threads; exact = thread counter deltas between its first and last sample):\n", n);
+    for (uint32_t i = 0; i < req->num_events; i++) {
+        fprintf(stderr, "    %-32s exact %.4g, PMI-attributed %.4g (%.1f%%)\n", req->events[i].name, exact[i], attributed[i],
+                exact[i] > 0 ? 100.0 * attributed[i] / exact[i] : 0.0);
+    }
+    fprintf(stderr, "    fixed counters 0/1: %.4g / %.4g (IPC %.3f)\n", fixed[0], fixed[1], fixed[0] > 0 ? fixed[1] / fixed[0] : 0.0);
+    if (cyc < 0 || ins < 0) return;
+    fprintf(stderr, "    process IPC: exact %.3f, PMI %.3f\n", exact[ins] / exact[cyc],
+            attributed[cyc] > 0 ? attributed[ins] / attributed[cyc] : 0.0);
+    byCycles_pmc = resp->counter[cyc];
+    qsort(list, n, sizeof(list[0]), compareThreads);
+    for (int k = 0; k < n && k < 8; k++) {
+        ThreadCounts* t = list[k];
+        double c = (double)(t->last[resp->counter[cyc]] - t->first[resp->counter[cyc]]);
+        double in = (double)(t->last[resp->counter[ins]] - t->first[resp->counter[ins]]);
+        double pc = (double)t->pmis[cyc] * req->events[cyc].period, pi = (double)t->pmis[ins] * req->events[ins].period;
+        fprintf(stderr, "    tid %-10llu cycles exact %.4g PMI %.4g | IPC exact %.3f PMI %.3f\n", (unsigned long long)t->tid,
+                c, pc, c > 0 ? in / c : 0.0, pc > 0 ? pi / pc : 0.0);
+    }
+}
 
 static bool flushOut(void) {
     size_t off = 0;
@@ -559,9 +666,15 @@ static bool handleEvent(const kd_buf* e) {
                 stats[event].pmis++;
                 if (KPC_DESC_FLAGS(pmi->desc) & KPC_KERNEL_PC) stats[event].kernel_pmis++;
                 stats[event].flags_seen |= KPC_DESC_FLAGS(pmi->desc);
+                if (thread_counts) {
+                    ThreadCounts* t = threadFor(e->arg5);
+                    if (t != NULL) t->pmis[event]++;
+                }
             }
             pmi->desc = 0;
         }
+    } else if (id == PERF_KPC_DATA_THREAD) {
+        threadData(e);
     } else if (id == PERF_CS_UHDR) {
         Pending* p = pendingFor(e->arg5);
         p->flags = (uint32_t)e->arg1;
@@ -661,6 +774,7 @@ static void serveClient(pid_t expected_pid) {
     size_t bufcount = 1 << 16;
     kd_buf* buf = malloc(bufcount * sizeof(kd_buf));
     memset(&stats, 0, sizeof(stats));
+    if (threads != NULL) memset(threads, 0, THREAD_SLOTS * sizeof(ThreadCounts));
     unattributed = 0;
     memset(cpu_pmi, 0, sizeof(cpu_pmi));
     num_pending = 0;
@@ -693,6 +807,7 @@ static void serveClient(pid_t expected_pid) {
                     (unsigned long long)stats[i].stacks, (unsigned long long)stats[i].precise,
                     stats[i].stacks ? 100.0 * stats[i].precise / stats[i].stacks : 0.0);
         }
+        if (thread_counts) reportThreadCounts(&req, &resp);
     }
 }
 
@@ -709,17 +824,18 @@ int main(int argc, char** argv) {
     uid_t uid = getenv("SUDO_UID") ? (uid_t)atoi(getenv("SUDO_UID")) : getuid();
     pid_t target_pid = 0;
     int opt;
-    while ((opt = getopt(argc, argv, "s:u:p:k")) != -1) {
+    while ((opt = getopt(argc, argv, "s:u:p:kt")) != -1) {
         switch (opt) {
             case 's': path = optarg; break;
             case 'u': uid = (uid_t)atoi(optarg); break;
             case 'p': target_pid = (pid_t)atoi(optarg); break;
             case 'k': force_kernel = true; break;
+            case 't': thread_counts = true; break;
             default: path = NULL; optind = argc; break;
         }
     }
     if (path == NULL) {
-        fprintf(stderr, "Usage: sudo %s -s <socket path> [-u <uid> | -p <pid>] [-k]\n", argv[0]);
+        fprintf(stderr, "Usage: sudo %s -s <socket path> [-u <uid> | -p <pid>] [-k] [-t]\n", argv[0]);
         return 1;
     }
     if (!loadFrameworks()) return 1;
