@@ -1,0 +1,976 @@
+/*
+ * Copyright The async-profiler authors
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/*
+ * asprof-kperf: privileged helper that samples user stacks on PMU overflow
+ * (PMI) for one process, using the private kperf/kperfdata frameworks and the
+ * kdebug trace buffer, and streams them to the async-profiler agent running in
+ * that process. See research/kperf/DESIGN.md.
+ *
+ * Usage: sudo asprof-kperf -s <socket path> [-u <uid>]   serve any number of agents
+ *        add -k to count kernel mode too, whatever the agent asks for
+ *        add -t to also log exact per-thread counts and compare them with PMI attribution
+ *        sudo asprof-kperf -s <socket path> -p <pid>    serve exactly one session for <pid>
+ *
+ * The helper only ever samples the pid of the connected socket peer. In the
+ * one-shot mode used by asprof, it also rejects peers other than <pid>, and
+ * returns as soon as the socket is ready, continuing in the background.
+ */
+
+#include <CoreFoundation/CoreFoundation.h>
+#include <dlfcn.h>
+#include <errno.h>
+#include <getopt.h>
+#include <libgen.h>
+#include <limits.h>
+#include <libproc.h>
+#include <poll.h>
+#include <signal.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/sysctl.h>
+#include <sys/un.h>
+#include <unistd.h>
+#include "../kperfProtocol.h"
+
+#define KPC_CLASS_FIXED_MASK        (1u << 0)
+#define KPC_CLASS_CONFIGURABLE_MASK (1u << 1)
+#define KPC_MAX_COUNTERS            32
+#define KPERF_SAMPLER_TH_INFO       (1u << 0)
+#define KPERF_SAMPLER_USTACK        (1u << 3)
+#define KPERF_SAMPLER_PMC_THREAD    (1u << 4)
+
+
+typedef struct kpep_db kpep_db;
+typedef struct kpep_config kpep_config;
+
+// Layout of kperfdata's event descriptor (stable since at least macOS 11)
+typedef struct {
+    const char* name;
+    const char* description;
+    const char* errata;
+    const char* alias;
+    const char* fallback;
+    uint32_t mask;  // counters the event may be programmed on, by absolute PMC index
+    uint8_t number;
+    uint8_t umask;
+    uint8_t reserved;
+    uint8_t is_fixed;
+} kpep_event;
+
+static int (*kpc_force_all_ctrs_set)(int);
+static int (*kpc_force_all_ctrs_get)(int*);
+static int (*kpc_set_counting)(uint32_t);
+static int (*kpc_set_thread_counting)(uint32_t);
+static int (*kpc_set_config)(uint32_t, uint64_t*);
+static int (*kpc_get_config)(uint32_t, uint64_t*);
+static int (*kpc_set_period)(uint32_t, uint64_t*);
+static int (*kpc_set_actionid)(uint32_t, uint32_t*);
+static uint32_t (*kpc_get_counter_count)(uint32_t);
+static uint32_t (*kpc_get_config_count)(uint32_t);
+static int (*kperf_action_count_set)(uint32_t);
+static int (*kperf_action_count_get)(uint32_t*);
+static int (*kperf_action_samplers_set)(uint32_t, uint32_t);
+static int (*kperf_action_filter_set_by_pid)(uint32_t, int32_t);
+static int (*kperf_sample_set)(uint32_t);
+static int (*kperf_reset)(void);
+static int (*kpep_db_create)(const char*, kpep_db**);
+static void (*kpep_db_free)(kpep_db*);
+static int (*kpep_db_event)(kpep_db*, const char*, kpep_event**);
+static int (*kpep_config_create)(kpep_db*, kpep_config**);
+static void (*kpep_config_free)(kpep_config*);
+static int (*kpep_config_force_counters)(kpep_config*);
+static int (*kpep_config_add_event)(kpep_config*, kpep_event**, uint32_t, uint32_t*);
+static int (*kpep_config_kpc)(kpep_config*, uint64_t*, size_t);
+
+#define LOAD(lib, sym) if ((*(void**)&sym = dlsym(lib, #sym)) == NULL) { fprintf(stderr, "Missing %s\n", #sym); return false; }
+
+static bool loadFrameworks(void) {
+    void* kperf = dlopen("/System/Library/PrivateFrameworks/kperf.framework/kperf", RTLD_LAZY);
+    void* kpep = dlopen("/System/Library/PrivateFrameworks/kperfdata.framework/kperfdata", RTLD_LAZY);
+    if (kperf == NULL || kpep == NULL) {
+        fprintf(stderr, "Cannot load kperf frameworks: %s\n", dlerror());
+        return false;
+    }
+    LOAD(kperf, kpc_force_all_ctrs_set) LOAD(kperf, kpc_force_all_ctrs_get) LOAD(kperf, kpc_set_counting)
+    LOAD(kperf, kpc_set_thread_counting) LOAD(kperf, kpc_set_config) LOAD(kperf, kpc_set_period)
+    LOAD(kperf, kpc_set_actionid) LOAD(kperf, kpc_get_counter_count) LOAD(kperf, kpc_get_config_count)
+    LOAD(kperf, kperf_action_count_set) LOAD(kperf, kperf_action_count_get)
+    LOAD(kperf, kperf_action_samplers_set) LOAD(kperf, kperf_action_filter_set_by_pid)
+    LOAD(kperf, kperf_sample_set) LOAD(kperf, kperf_reset)
+    *(void**)&kpc_get_config = dlsym(kperf, "kpc_get_config");  // optional, diagnostics only
+    LOAD(kpep, kpep_db_create) LOAD(kpep, kpep_db_free) LOAD(kpep, kpep_db_event) LOAD(kpep, kpep_config_create)
+    LOAD(kpep, kpep_config_free) LOAD(kpep, kpep_config_force_counters) LOAD(kpep, kpep_config_add_event)
+    LOAD(kpep, kpep_config_kpc)
+    return true;
+}
+
+// ---------------------------------------------------------------- kdebug
+
+typedef struct {
+    uint64_t timestamp;
+    uint64_t arg1, arg2, arg3, arg4;
+    uint64_t arg5;  // thread id
+    uint32_t debugid;
+    uint32_t cpuid;
+    uint64_t unused;
+} kd_buf;
+
+typedef struct {
+    unsigned int type;
+    unsigned int value1, value2, value3, value4;
+} kd_regtype;
+
+#define KDBG_CLASSTYPE  0x10000
+#define DBG_PERF        37
+#define KDBG_EVENTID(c, s, code) (((uint32_t)(c) << 24) | ((uint32_t)(s) << 16) | ((uint32_t)(code) << 2))
+#define DEBUGID_MASK    (~3u)
+#define DBG_FUNC_START  1u
+#define PERF_GEN_EVENT  KDBG_EVENTID(DBG_PERF, 0, 0)
+#define PERF_CS_UDATA   KDBG_EVENTID(DBG_PERF, 2, 4)
+#define PERF_CS_UHDR    KDBG_EVENTID(DBG_PERF, 2, 6)
+#define PERF_KPC_HNDLR  KDBG_EVENTID(DBG_PERF, 6, 0)
+#define PERF_KPC_DATA_THREAD KDBG_EVENTID(DBG_PERF, 6, 8)
+// Synthesized by the kdebug reader when storage units were stolen (buffer wrapped)
+#define TRACE_LOST_EVENTS KDBG_EVENTID(7, 2, 2)
+#define CALLSTACK_VALID (1u << 0)
+#define SAMPLE_FLAG_PEND_USER (1u << 0)
+#define KPC_DESC_COUNTER(desc) (((desc) >> 32) & 0xffff)
+#define KPC_DESC_FLAGS(desc)   ((desc) >> 48)
+#define KPC_KERNEL_PC          0x01
+#define KPC_KERNEL_COUNTING    0x02
+#define KPC_USER_COUNTING      0x04
+#define KPC_CAPTURED_PC        0x08
+
+// arm64 kpc config word: counting modes (XNU osfmk/arm64/kpc.c). All zero gives user-only
+// on macOS 27 / M5 (read back as EL0A64, PMI flags show user counting only).
+#define CFGWORD_EL0A64EN_MASK  0x20000
+#define CFGWORD_EL1EN_MASK     0x40000
+#define CFGWORD_ALLMODES_MASK  0xf0000
+
+static int kdCtl(int op, int arg, void* buf, size_t* len) {
+    int mib[4] = {CTL_KERN, KERN_KDEBUG, op, arg};
+    return sysctl(mib, arg >= 0 ? 4 : 3, buf, len, NULL, 0);
+}
+
+static int kdebugSetup(int nbufs) {
+    size_t z = 0;
+    kdCtl(KERN_KDREMOVE, -1, NULL, &z);
+    if (kdCtl(KERN_KDSETBUF, nbufs, NULL, &z) || kdCtl(KERN_KDSETUP, -1, NULL, &z)) return -1;
+    kd_regtype kdr = {KDBG_CLASSTYPE, DBG_PERF, DBG_PERF + 1, 0, 0};
+    size_t len = sizeof(kdr);
+    if (kdCtl(KERN_KDSETREG, -1, &kdr, &len)) return -1;
+    return kdCtl(KERN_KDENABLE, 1, NULL, &z);
+}
+
+static void kdebugTeardown(void) {
+    size_t z = 0;
+    kdCtl(KERN_KDENABLE, 0, NULL, &z);
+    kdCtl(KERN_KDREMOVE, -1, NULL, &z);
+}
+
+// --------------------------------------------------------- exclusivity
+
+enum { KTRACE_STATE_OFF = 0, KTRACE_STATE_FG = 1, KTRACE_STATE_BG = 2 };
+
+// The kernel arbitrates ktrace (kdebug + kperf) ownership and the forcing of
+// all PMCs, but reports conflicts only as EBUSY/EACCES from whichever call
+// hits them first. Check up front and say who holds what.
+static bool checkExclusive(char* msg, size_t msglen) {
+    int forced = 0;
+    if (kpc_force_all_ctrs_get(&forced) == 0 && forced) {
+        snprintf(msg, msglen, "PMU counters are reserved by another process (Instruments, xctrace or another profiler?)");
+        return false;
+    }
+
+    int state = 0, owner = 0;
+    size_t len = sizeof(state);
+    sysctlbyname("ktrace.state", &state, &len, NULL, 0);
+    len = sizeof(owner);
+    sysctlbyname("ktrace.owning_pid", &owner, &len, NULL, 0);
+    char by[64] = "";
+    len = sizeof(by);
+    sysctlbyname("ktrace.configured_by", by, &len, NULL, 0);
+
+    if (state == KTRACE_STATE_FG && owner != 0 && owner != getpid() && kill(owner, 0) == 0) {
+        snprintf(msg, msglen, "Kernel tracing is in use by %s (pid %d)", by[0] ? by : "another process", owner);
+        return false;
+    }
+    if (state == KTRACE_STATE_BG) {
+        // e.g. tailspind: taking over is allowed and it is notified when we reset
+        fprintf(stderr, "asprof-kperf: taking over kernel tracing from background tool %s\n", by);
+    }
+    return true;
+}
+
+// ------------------------------------------------------------ PMU setup
+
+static void resetCounters(void) {
+    uint64_t zeros[KPC_MAX_COUNTERS] = {0};
+    uint32_t zero_actions[KPC_MAX_COUNTERS] = {0};
+    kperf_sample_set(0);
+    kperf_reset();
+    kpc_set_counting(0);
+    kpc_set_thread_counting(0);
+    kpc_set_actionid(KPC_CLASS_CONFIGURABLE_MASK, zero_actions);
+    kpc_set_period(KPC_CLASS_CONFIGURABLE_MASK, zeros);
+    kpc_set_config(KPC_CLASS_CONFIGURABLE_MASK, zeros);
+    kpc_force_all_ctrs_set(0);
+}
+
+// Absolute PMC -> index into the request's events, or -1
+static int counter_event[KPC_MAX_COUNTERS];
+
+// Which PMCs can latch the exact PC of an event is a property of the event:
+// kperfdata's database has it as "pc_capture_counters_mask" (0xe0, i.e. PMC 5-7,
+// for the L1D/TLB miss, load source and branch mispredict events on Apple
+// silicon; nothing for cycles or instructions), but its event struct does not
+// expose it, so read the database plist for this CPU directly.
+static CFDictionaryRef kpep_events;
+
+static void loadCaptureMasks(void) {
+    int type = 0, subtype = 0;
+    uint32_t family = 0;
+    size_t len = sizeof(type);
+    sysctlbyname("hw.cputype", &type, &len, NULL, 0);
+    len = sizeof(subtype);
+    sysctlbyname("hw.cpusubtype", &subtype, &len, NULL, 0);
+    len = sizeof(family);
+    sysctlbyname("hw.cpufamily", &family, &len, NULL, 0);
+
+    char path[128];
+    snprintf(path, sizeof(path), "/usr/share/kpep/cpu_%x_%x_%x.plist", type, subtype, family);
+    CFURLRef url = CFURLCreateFromFileSystemRepresentation(NULL, (const UInt8*)path, strlen(path), false);
+    CFReadStreamRef stream = url != NULL ? CFReadStreamCreateWithFile(NULL, url) : NULL;
+    if (stream != NULL && CFReadStreamOpen(stream)) {
+        CFPropertyListRef plist = CFPropertyListCreateWithStream(NULL, stream, 0, kCFPropertyListImmutable, NULL, NULL);
+        if (plist != NULL && CFGetTypeID(plist) == CFDictionaryGetTypeID()) {
+            CFDictionaryRef sys = CFDictionaryGetValue(plist, CFSTR("system"));
+            CFDictionaryRef cpu = sys != NULL ? CFDictionaryGetValue(sys, CFSTR("cpu")) : NULL;
+            kpep_events = cpu != NULL ? CFDictionaryGetValue(cpu, CFSTR("events")) : NULL;
+            if (kpep_events != NULL) CFRetain(kpep_events);
+        }
+        if (plist != NULL) CFRelease(plist);
+        CFReadStreamClose(stream);
+    }
+    if (stream != NULL) CFRelease(stream);
+    if (url != NULL) CFRelease(url);
+    if (kpep_events == NULL) {
+        fprintf(stderr, "asprof-kperf: cannot read %s; precise PC capture disabled\n", path);
+    }
+}
+
+static uint32_t captureMask(const char* name) {
+    if (kpep_events == NULL) return 0;
+    CFStringRef key = CFStringCreateWithCString(NULL, name, kCFStringEncodingUTF8);
+    CFDictionaryRef ev = CFDictionaryGetValue(kpep_events, key);
+    CFRelease(key);
+    CFNumberRef mask = ev != NULL ? CFDictionaryGetValue(ev, CFSTR("pc_capture_counters_mask")) : NULL;
+    uint32_t v = 0;
+    if (mask != NULL) CFNumberGetValue(mask, kCFNumberSInt32Type, &v);
+    return v;
+}
+
+// Looks up the event's counter mask and its counter-independent config word.
+static bool eventConfig(kpep_db* db, const char* name, uint32_t* mask, uint64_t* config) {
+    kpep_event* ev = NULL;
+    kpep_config* cfg = NULL;
+    uint64_t regs[KPC_MAX_COUNTERS] = {0};
+    uint32_t err = 0;
+    bool ok = kpep_db_event(db, name, &ev) == 0 &&
+              kpep_config_create(db, &cfg) == 0 &&
+              kpep_config_force_counters(cfg) == 0 &&
+              kpep_config_add_event(cfg, &ev, 0, &err) == 0 &&
+              kpep_config_kpc(cfg, regs, sizeof(regs)) == 0;
+    if (cfg != NULL) kpep_config_free(cfg);
+    if (!ok || ev->is_fixed || regs[0] == 0) return false;
+    *mask = ev->mask;
+    *config = regs[0];
+    return true;
+}
+
+// -t: per-thread counter virtualization (kpc_set_thread_counting) plus kperf's
+// PMC_THREAD sampler, so each sample also logs the thread's exact cumulative
+// counts, indexed by absolute PMC. Used to check PMI attribution per thread.
+static bool thread_counts = false;
+static uint64_t event_period[KPERF_MAX_EVENTS];
+static uint32_t num_thread_ctrs;
+
+// Programs one configurable PMC per event to raise a PMI every `period` events,
+// all bound to kperf action 1 which samples the user stack of `pid`. Events go
+// on the PC-capturing PMCs first, unless the request opts out.
+static int startSampling(pid_t pid, const struct KperfRequest* req, struct KperfResponse* resp) {
+    char* msg = resp->message;
+    size_t msglen = sizeof(resp->message);
+    kpep_db* db = NULL;
+    uint64_t regs[KPC_MAX_COUNTERS] = {0};
+    uint64_t periods[KPC_MAX_COUNTERS] = {0};
+    uint32_t actions[KPC_MAX_COUNTERS] = {0};
+    int r = EINVAL;
+
+    if (req->num_events == 0 || req->num_events > KPERF_MAX_EVENTS) {
+        snprintf(msg, msglen, "Between 1 and %d events are supported", KPERF_MAX_EVENTS);
+        return EINVAL;
+    }
+    if (!checkExclusive(msg, msglen)) {
+        return EBUSY;
+    }
+    if (kpep_db_create(NULL, &db)) {
+        snprintf(msg, msglen, "Cannot load PMU event database");
+        return EINVAL;
+    }
+
+    // Counters are only all available once forced
+    if (kpc_force_all_ctrs_set(1)) {
+        r = errno ? errno : EACCES;
+        snprintf(msg, msglen, "Cannot reserve PMU counters: %s", strerror(r));
+        goto out;
+    }
+    uint32_t nfixed = kpc_get_counter_count(KPC_CLASS_FIXED_MASK);
+    uint32_t nconfig = kpc_get_config_count(KPC_CLASS_CONFIGURABLE_MASK);
+    num_thread_ctrs = nfixed + nconfig;
+    if (nconfig == 0 || nfixed + nconfig > KPC_MAX_COUNTERS) {
+        snprintf(msg, msglen, "Unexpected PMU layout: %u fixed, %u configurable", nfixed, nconfig);
+        goto out;
+    }
+
+    uint32_t masks[KPERF_MAX_EVENTS];
+    uint64_t configs[KPERF_MAX_EVENTS];
+    for (uint32_t i = 0; i < req->num_events; i++) {
+        if (!eventConfig(db, req->events[i].name, &masks[i], &configs[i])) {
+            snprintf(msg, msglen, "Unknown or fixed-counter-only PMU event %s", req->events[i].name);
+            goto out;
+        }
+        if (req->events[i].period == 0) {
+            snprintf(msg, msglen, "Zero period for %s", req->events[i].name);
+            goto out;
+        }
+    }
+
+    // Assign absolute PMCs in three passes:
+    //  0. events that support PC capture, on a PMC that captures for them
+    //  1. other events, on PMCs that no event in this request could capture on
+    //  2. whatever is left, on any allowed PMC
+    uint32_t capture_masks[KPERF_MAX_EVENTS];
+    uint32_t any_capture = 0;
+    bool prefer_capture = !(req->flags & KPERF_REQ_NO_PC_CAPTURE);
+    for (uint32_t i = 0; i < req->num_events; i++) {
+        capture_masks[i] = prefer_capture ? captureMask(req->events[i].name) & masks[i] : 0;
+        any_capture |= capture_masks[i];
+    }
+    for (int c = 0; c < KPC_MAX_COUNTERS; c++) counter_event[c] = -1;
+    uint32_t used = 0;
+    for (int pass = 0; pass < 3; pass++) {
+        for (uint32_t i = 0; i < req->num_events; i++) {
+            if (resp->counter[i] != 0) continue;
+            uint32_t allowed = pass == 0 ? capture_masks[i] : pass == 1 ? masks[i] & ~any_capture : masks[i];
+            for (uint32_t c = nfixed; c < nfixed + nconfig; c++) {
+                if ((used & (1u << c)) || !(allowed & (1u << c))) continue;
+                used |= 1u << c;
+                resp->counter[i] = (uint8_t)c;
+                resp->pc_capture[i] = (capture_masks[i] & (1u << c)) != 0;
+                counter_event[c] = (int)i;
+                regs[c - nfixed] = configs[i];
+                periods[c - nfixed] = req->events[i].period;
+                event_period[i] = req->events[i].period;
+                actions[c - nfixed] = 1;
+                break;
+            }
+        }
+    }
+    // Set the mode bits explicitly: all zero (kpep's default) counts user mode only
+    bool kernel = (req->flags & KPERF_REQ_KERNEL_COUNTING) != 0;
+    uint64_t kpep_modes[KPC_MAX_COUNTERS] = {0};
+    for (uint32_t c = 0; c < nconfig; c++) {
+        if (regs[c] == 0) continue;
+        kpep_modes[c] = regs[c] & CFGWORD_ALLMODES_MASK;
+        regs[c] &= ~(uint64_t)CFGWORD_ALLMODES_MASK;
+        regs[c] |= CFGWORD_EL0A64EN_MASK | (kernel ? CFGWORD_EL1EN_MASK : 0);
+    }
+    for (uint32_t i = 0; i < req->num_events; i++) {
+        if (resp->counter[i] == 0) {
+            snprintf(msg, msglen, "No free counter for %s", req->events[i].name);
+            goto out;
+        }
+    }
+
+    // kperf cannot shrink its action array, and other clients may have grown it
+    uint32_t nactions = 0;
+    kperf_sample_set(0);
+    kperf_reset();
+    kperf_action_count_get(&nactions);
+
+    if (kpc_set_config(KPC_CLASS_CONFIGURABLE_MASK, regs) ||
+        kpc_set_period(KPC_CLASS_CONFIGURABLE_MASK, periods) ||
+        kpc_set_actionid(KPC_CLASS_CONFIGURABLE_MASK, actions) ||
+        kperf_action_count_set(nactions > 1 ? nactions : 1) ||
+        (thread_counts && kpc_set_thread_counting(KPC_CLASS_FIXED_MASK | KPC_CLASS_CONFIGURABLE_MASK)) ||
+        kperf_action_samplers_set(1, KPERF_SAMPLER_USTACK | KPERF_SAMPLER_TH_INFO |
+                                         (thread_counts ? KPERF_SAMPLER_PMC_THREAD : 0)) ||
+        kperf_action_filter_set_by_pid(1, pid)) {
+        r = errno ? errno : EINVAL;
+        snprintf(msg, msglen, "Cannot program kperf: %s", strerror(r));
+        goto out;
+    }
+    for (uint32_t c = 0; c < nconfig; c++) {
+        if (regs[c] == 0) continue;
+        uint64_t readback[KPC_MAX_COUNTERS] = {0};
+        bool have_readback = kpc_get_config != NULL && kpc_get_config(KPC_CLASS_CONFIGURABLE_MASK, readback) == 0;
+        fprintf(stderr, "  PMC%u config 0x%llx: modes kpep 0x%llx, set 0x%llx, read back %s0x%llx\n", c + nfixed,
+                (unsigned long long)regs[c], (unsigned long long)kpep_modes[c] >> 16,
+                (unsigned long long)(regs[c] & CFGWORD_ALLMODES_MASK) >> 16, have_readback ? "" : "(unavailable) ",
+                (unsigned long long)(readback[c] & CFGWORD_ALLMODES_MASK) >> 16);
+    }
+    if (kdebugSetup(1 << 20)) {
+        r = errno ? errno : EBUSY;
+        snprintf(msg, msglen, "Cannot set up kdebug: %s", strerror(r));
+        goto out;
+    }
+    if (kperf_sample_set(1) || kpc_set_counting(KPC_CLASS_FIXED_MASK | KPC_CLASS_CONFIGURABLE_MASK)) {
+        r = errno ? errno : EINVAL;
+        snprintf(msg, msglen, "Cannot start sampling: %s", strerror(r));
+        goto out;
+    }
+    r = 0;
+
+out:
+    kpep_db_free(db);
+    if (r != 0) {
+        kdebugTeardown();
+        resetCounters();
+    }
+    return r;
+}
+
+// --------------------------------------------------------------- serving
+
+// Per-thread state: the PMIs of our pid since the last stack, and the stack being assembled
+typedef struct {
+    uint64_t tid;
+    uint32_t pmis[KPERF_MAX_EVENTS];        // per event, coalesced into the next stack
+    uint64_t precise_pc[KPERF_MAX_EVENTS];  // latest captured PC per event
+    uint64_t timestamp;
+    uint32_t expect;
+    uint32_t have;
+    uint32_t flags;
+    uint64_t frames[KPERF_MAX_FRAMES + 1];
+} Pending;
+
+// Per-CPU: the last PMI taken, until kperf confirms it passed the pid filter
+typedef struct {
+    uint64_t tid;
+    uint64_t desc;
+    uint64_t pc;
+    uint64_t delta;  // events since the previous PMI of this counter on this CPU, 0 if unknown
+} CpuPmi;
+
+#define MAX_PENDING 1024
+#define MAX_CPUS    256
+static Pending pending[MAX_PENDING];
+static int num_pending;
+static CpuPmi cpu_pmi[MAX_CPUS];
+
+static char outbuf[1 << 20];
+static size_t outlen;
+static int client_fd = -1;
+
+static struct {
+    uint64_t pmis, kernel_pmis, stacks, precise, flags_seen;
+    uint64_t weight;     // sum of the matched PMIs' actual counter deltas (period where unknown)
+    uint64_t unmatched;  // PMIs on our threads that kperf never sampled
+
+} stats[KPERF_MAX_EVENTS];
+static uint64_t unattributed;
+static uint64_t lost_markers, orphan_samples;
+static uint64_t cpu_last_count[MAX_CPUS][KPC_MAX_COUNTERS];
+
+// Per-thread exact counts (first and last PMC_THREAD vector) and PMIs attributed by event
+typedef struct {
+    uint64_t tid;
+    uint64_t cur[KPC_MAX_COUNTERS], first[KPC_MAX_COUNTERS], last[KPC_MAX_COUNTERS];
+    uint32_t have;
+    bool started, seen;
+    uint64_t pmis[KPERF_MAX_EVENTS];
+} ThreadCounts;
+
+#define THREAD_SLOTS 8192
+static ThreadCounts* threads;  // open addressing by tid
+
+static ThreadCounts* threadFor(uint64_t tid) {
+    if (threads == NULL && (threads = calloc(THREAD_SLOTS, sizeof(ThreadCounts))) == NULL) return NULL;
+    for (uint32_t i = 0, h = (uint32_t)(tid * 0x9e3779b97f4a7c15ULL >> 51); i < THREAD_SLOTS; i++, h = (h + 1) % THREAD_SLOTS) {
+        if (threads[h].tid == tid) return &threads[h];
+        if (threads[h].tid == 0) {
+            threads[h].tid = tid;
+            return &threads[h];
+        }
+    }
+    return NULL;
+}
+
+static void threadData(const kd_buf* e) {
+    ThreadCounts* t = threadFor(e->arg5);
+    if (t == NULL) return;
+    if (e->debugid & DBG_FUNC_START) {
+        t->have = 0;
+        t->started = true;
+    }
+    if (!t->started) return;
+    uint64_t a[4] = {e->arg1, e->arg2, e->arg3, e->arg4};
+    for (int i = 0; i < 4 && t->have < num_thread_ctrs && t->have < KPC_MAX_COUNTERS; i++) t->cur[t->have++] = a[i];
+    if (t->have < num_thread_ctrs) return;
+    t->started = false;
+    bool zero = true;
+    for (uint32_t i = 0; i < num_thread_ctrs; i++) zero &= t->cur[i] == 0;
+    if (zero) return;  // the thread's counter buffer isn't allocated yet
+    if (!t->seen) memcpy(t->first, t->cur, sizeof(t->cur));
+    memcpy(t->last, t->cur, sizeof(t->cur));
+    t->seen = true;
+}
+
+static int byCycles_pmc;
+static int compareThreads(const void* a, const void* b) {
+    const ThreadCounts* x = *(ThreadCounts* const*)a;
+    const ThreadCounts* y = *(ThreadCounts* const*)b;
+    uint64_t dx = x->last[byCycles_pmc] - x->first[byCycles_pmc], dy = y->last[byCycles_pmc] - y->first[byCycles_pmc];
+    return dx < dy ? 1 : dx > dy ? -1 : 0;
+}
+
+// Exact counts vs PMI-attributed counts (PMIs x period), per event over all threads,
+// then for the busiest threads; and IPC both ways if cycles and instructions were sampled
+static void reportThreadCounts(const struct KperfRequest* req, const struct KperfResponse* resp) {
+    if (threads == NULL) return;
+    int cyc = -1, ins = -1;
+    for (uint32_t i = 0; i < req->num_events; i++) {
+        if (strcmp(req->events[i].name, "CORE_ACTIVE_CYCLE") == 0) cyc = (int)i;
+        if (strcmp(req->events[i].name, "INST_ALL") == 0) ins = (int)i;
+    }
+    ThreadCounts* list[THREAD_SLOTS];
+    int n = 0;
+    double exact[KPERF_MAX_EVENTS] = {0}, attributed[KPERF_MAX_EVENTS] = {0}, fixed[2] = {0};
+    for (int h = 0; h < THREAD_SLOTS; h++) {
+        ThreadCounts* t = &threads[h];
+        if (t->tid == 0 || !t->seen) continue;
+        list[n++] = t;
+        for (uint32_t i = 0; i < req->num_events; i++) {
+            exact[i] += (double)(t->last[resp->counter[i]] - t->first[resp->counter[i]]);
+            attributed[i] += (double)t->pmis[i] * req->events[i].period;
+        }
+        for (int f = 0; f < 2; f++) fixed[f] += (double)(t->last[f] - t->first[f]);
+    }
+    fprintf(stderr, "  Per-thread counts (%d threads; exact = thread counter deltas between its first and last sample):\n", n);
+    for (uint32_t i = 0; i < req->num_events; i++) {
+        fprintf(stderr, "    %-32s exact %.4g, PMI-attributed %.4g (%.1f%%), by counter deltas %.4g (%.1f%%)\n",
+                req->events[i].name, exact[i], attributed[i], exact[i] > 0 ? 100.0 * attributed[i] / exact[i] : 0.0,
+                (double)stats[i].weight, exact[i] > 0 ? 100.0 * stats[i].weight / exact[i] : 0.0);
+    }
+    fprintf(stderr, "    fixed counters 0/1: %.4g / %.4g (IPC %.3f)\n", fixed[0], fixed[1], fixed[0] > 0 ? fixed[1] / fixed[0] : 0.0);
+    if (cyc < 0 || ins < 0) return;
+    fprintf(stderr, "    process IPC: exact %.3f, PMI %.3f\n", exact[ins] / exact[cyc],
+            attributed[cyc] > 0 ? attributed[ins] / attributed[cyc] : 0.0);
+    byCycles_pmc = resp->counter[cyc];
+    qsort(list, n, sizeof(list[0]), compareThreads);
+    for (int k = 0; k < n && k < 8; k++) {
+        ThreadCounts* t = list[k];
+        double c = (double)(t->last[resp->counter[cyc]] - t->first[resp->counter[cyc]]);
+        double in = (double)(t->last[resp->counter[ins]] - t->first[resp->counter[ins]]);
+        double pc = (double)t->pmis[cyc] * req->events[cyc].period, pi = (double)t->pmis[ins] * req->events[ins].period;
+        fprintf(stderr, "    tid %-10llu cycles exact %.4g PMI %.4g | IPC exact %.3f PMI %.3f\n", (unsigned long long)t->tid,
+                c, pc, c > 0 ? in / c : 0.0, pc > 0 ? pi / pc : 0.0);
+    }
+}
+
+static bool flushOut(void) {
+    size_t off = 0;
+    while (off < outlen) {
+        ssize_t w = write(client_fd, outbuf + off, outlen - off);
+        if (w < 0) {
+            if (errno == EINTR) continue;
+            return false;
+        }
+        off += w;
+    }
+    outlen = 0;
+    return true;
+}
+
+static bool emitOne(Pending* p, int event, uint32_t pmis) {
+    // The last of the non-async frames is the fixup value appended by
+    // callstack_fixup_user(); send it separately.
+    uint32_t n = p->expect > 0 ? p->expect - 1 : 0;
+    if (n > KPERF_MAX_FRAMES) n = KPERF_MAX_FRAMES;
+    struct KperfSample s = {0};
+    s.timestamp = p->timestamp;
+    s.thread_id = p->tid;
+    s.fixup = p->expect > 0 ? p->frames[p->expect - 1] : 0;
+    s.precise_pc = p->precise_pc[event];
+    s.flags = p->flags;
+    s.event = (uint16_t)event;
+    s.weight = pmis > 0xffff ? 0xffff : pmis > 0 ? (uint16_t)pmis : 1;
+    s.num_frames = n;
+
+    stats[event].stacks++;
+    if (s.precise_pc) stats[event].precise++;
+
+    size_t need = sizeof(s) + n * sizeof(uint64_t);
+    if (outlen + need > sizeof(outbuf) && !flushOut()) return false;
+    memcpy(outbuf + outlen, &s, sizeof(s));
+    memcpy(outbuf + outlen + sizeof(s), p->frames, n * sizeof(uint64_t));
+    outlen += need;
+    return true;
+}
+
+// PMIs of several events can coalesce into one stack: send one sample per event,
+// each weighted by its own PMI count, sharing the stack
+static bool emit(Pending* p) {
+    bool any = false, ok = true;
+    for (int i = 0; i < KPERF_MAX_EVENTS && ok; i++) {
+        if (p->pmis[i] > 0) {
+            ok = emitOne(p, i, p->pmis[i]);
+            any = true;
+        }
+    }
+    if (!any) {
+        unattributed++;
+        ok = emitOne(p, 0, 1);
+    }
+    memset(p->pmis, 0, sizeof(p->pmis));
+    memset(p->precise_pc, 0, sizeof(p->precise_pc));
+    return ok;
+}
+
+static Pending* pendingFor(uint64_t tid) {
+    for (int i = 0; i < num_pending; i++) {
+        if (pending[i].tid == tid) return &pending[i];
+    }
+    if (num_pending == MAX_PENDING) num_pending = 0;  // drop everything; should never happen
+    Pending* p = &pending[num_pending++];
+    memset(p, 0, sizeof(*p));
+    p->tid = tid;
+    return p;
+}
+
+static bool knownThread(uint64_t tid) {
+    for (int i = 0; i < num_pending; i++) {
+        if (pending[i].tid == tid) return true;
+    }
+    return false;
+}
+
+static bool handleEvent(const kd_buf* e) {
+    uint32_t id = e->debugid & DEBUGID_MASK;
+    if (e->debugid == TRACE_LOST_EVENTS) {
+        lost_markers++;
+    } else if (id == PERF_KPC_HNDLR && (e->debugid & DBG_FUNC_START)) {
+        // PMI on any process: desc, the counter's cumulative count on this CPU, PC (precise if captured)
+        if (e->cpuid < MAX_CPUS) {
+            CpuPmi* prev = &cpu_pmi[e->cpuid];
+            if (prev->desc != 0 && knownThread(prev->tid)) {
+                // The previous PMI on this CPU was on one of our threads, but kperf didn't sample it
+                uint32_t pctr = (uint32_t)KPC_DESC_COUNTER(prev->desc);
+                int pev = pctr < KPC_MAX_COUNTERS ? counter_event[pctr] : -1;
+                if (pev >= 0) stats[pev].unmatched++;
+            }
+            uint32_t ctr = (uint32_t)KPC_DESC_COUNTER(e->arg1);
+            uint64_t delta = 0;
+            if (ctr < KPC_MAX_COUNTERS) {
+                uint64_t* last = &cpu_last_count[e->cpuid][ctr];
+                if (*last != 0 && e->arg2 > *last) delta = e->arg2 - *last;
+                *last = e->arg2;
+            }
+            *prev = (CpuPmi){e->arg5, e->arg1, e->arg3, delta};
+        }
+    } else if (id == PERF_GEN_EVENT && (e->debugid & DBG_FUNC_START) && (e->arg4 & SAMPLE_FLAG_PEND_USER)) {
+        // kperf sampled in interrupt context: the PMI passed the pid filter
+        if (e->cpuid < MAX_CPUS && cpu_pmi[e->cpuid].tid == e->arg5 && cpu_pmi[e->cpuid].desc != 0) {
+            CpuPmi* pmi = &cpu_pmi[e->cpuid];
+            Pending* p = pendingFor(e->arg5);
+            uint32_t ctr = (uint32_t)KPC_DESC_COUNTER(pmi->desc);
+            int event = ctr < KPC_MAX_COUNTERS ? counter_event[ctr] : -1;
+            if (event >= 0) {
+                p->pmis[event]++;
+                p->precise_pc[event] = (KPC_DESC_FLAGS(pmi->desc) & KPC_CAPTURED_PC) ? pmi->pc : 0;
+                stats[event].pmis++;
+                if (KPC_DESC_FLAGS(pmi->desc) & KPC_KERNEL_PC) stats[event].kernel_pmis++;
+                stats[event].flags_seen |= KPC_DESC_FLAGS(pmi->desc);
+                stats[event].weight += pmi->delta ? pmi->delta : event_period[event];
+                if (thread_counts) {
+                    ThreadCounts* t = threadFor(e->arg5);
+                    if (t != NULL) t->pmis[event]++;
+                }
+            }
+            pmi->desc = 0;
+        } else {
+            orphan_samples++;
+        }
+    } else if (id == PERF_KPC_DATA_THREAD) {
+        threadData(e);
+    } else if (id == PERF_CS_UHDR) {
+        Pending* p = pendingFor(e->arg5);
+        p->flags = (uint32_t)e->arg1;
+        p->expect = (p->flags & CALLSTACK_VALID) ? (uint32_t)e->arg2 : 0;
+        p->have = 0;
+        p->timestamp = e->timestamp;
+    } else if (id == PERF_CS_UDATA) {
+        Pending* p = pendingFor(e->arg5);
+        if (p->expect == 0) return true;
+        uint64_t a[4] = {e->arg1, e->arg2, e->arg3, e->arg4};
+        for (int i = 0; i < 4 && p->have < p->expect; i++, p->have++) {
+            if (p->have <= KPERF_MAX_FRAMES) p->frames[p->have] = a[i];
+        }
+        if (p->have >= p->expect) {
+            if (p->expect > KPERF_MAX_FRAMES + 1) {
+                // Keep the fixup in the last slot
+                p->frames[KPERF_MAX_FRAMES] = 0;
+                p->expect = KPERF_MAX_FRAMES + 1;
+            }
+            bool ok = emit(p);
+            p->expect = 0;
+            return ok;
+        }
+    }
+    return true;
+}
+
+static volatile sig_atomic_t terminated;
+
+static void onSignal(int sig) {
+    terminated = 1;
+}
+
+static bool clientClosed(void) {
+    struct pollfd pfd = {client_fd, POLLIN, 0};
+    if (poll(&pfd, 1, 0) > 0) {
+        char c;
+        return recv(client_fd, &c, 1, MSG_PEEK | MSG_DONTWAIT) <= 0;
+    }
+    return false;
+}
+
+static bool readFully(int fd, void* buf, size_t len) {
+    while (len > 0) {
+        ssize_t r = read(fd, buf, len);
+        if (r <= 0) {
+            if (r < 0 && errno == EINTR) continue;
+            return false;
+        }
+        buf = (char*)buf + r;
+        len -= r;
+    }
+    return true;
+}
+
+static bool verbose = true;
+static bool force_kernel = false;
+
+static void serveClient(pid_t expected_pid) {
+    pid_t pid = 0;
+    socklen_t len = sizeof(pid);
+    if (getsockopt(client_fd, SOL_LOCAL, LOCAL_PEERPID, &pid, &len) != 0 || pid <= 0) {
+        perror("LOCAL_PEERPID");
+        return;
+    }
+    if (expected_pid != 0 && pid != expected_pid) {
+        fprintf(stderr, "Rejected connection from pid %d, expected %d\n", pid, expected_pid);
+        return;
+    }
+
+    struct KperfRequest req;
+    if (!readFully(client_fd, &req, sizeof(req)) || req.magic != KPERF_MAGIC) {
+        fprintf(stderr, "Bad request from pid %d (agent and helper versions differ?)\n", pid);
+        return;
+    }
+    for (uint32_t i = 0; i < KPERF_MAX_EVENTS; i++) req.events[i].name[KPERF_EVENT_LEN - 1] = 0;
+    if (force_kernel) req.flags |= KPERF_REQ_KERNEL_COUNTING;
+
+    struct KperfResponse resp;
+    memset(&resp, 0, sizeof(resp));
+    resp.magic = KPERF_MAGIC;
+    resp.error = startSampling(pid, &req, &resp);
+    if (write(client_fd, &resp, sizeof(resp)) != sizeof(resp) || resp.error != 0) {
+        if (resp.error) fprintf(stderr, "pid %d: %s\n", pid, resp.message);
+        else { kdebugTeardown(); resetCounters(); }
+        return;
+    }
+    if (verbose) {
+        fprintf(stderr, "Sampling pid %d:", pid);
+        for (uint32_t i = 0; i < req.num_events; i++) {
+            fprintf(stderr, " %s/%llu on PMC%u%s", req.events[i].name, (unsigned long long)req.events[i].period,
+                    resp.counter[i], resp.pc_capture[i] ? " (precise PC)" : "");
+        }
+        fprintf(stderr, "\n");
+    }
+
+    size_t bufcount = 1 << 16;
+    kd_buf* buf = malloc(bufcount * sizeof(kd_buf));
+    memset(&stats, 0, sizeof(stats));
+    if (threads != NULL) memset(threads, 0, THREAD_SLOTS * sizeof(ThreadCounts));
+    unattributed = 0;
+    lost_markers = orphan_samples = 0;
+    memset(cpu_last_count, 0, sizeof(cpu_last_count));
+    memset(cpu_pmi, 0, sizeof(cpu_pmi));
+    num_pending = 0;
+    outlen = 0;
+    while (!terminated && !clientClosed()) {
+        size_t n = bufcount * sizeof(kd_buf);
+        int mib[3] = {CTL_KERN, KERN_KDEBUG, KERN_KDREADTR};
+        if (sysctl(mib, 3, buf, &n, NULL, 0) != 0) {
+            perror("KERN_KDREADTR");
+            break;
+        }
+        bool ok = true;
+        for (size_t i = 0; i < n && ok; i++) {
+            ok = handleEvent(&buf[i]);
+        }
+        if (!ok || !flushOut()) break;
+        if (n < bufcount / 2) usleep(5000);
+    }
+    free(buf);
+    kdebugTeardown();
+    resetCounters();
+    if (verbose) {
+        fprintf(stderr, "Stopped sampling pid %d (%s counting, %llu stacks without a PMI):\n", pid,
+                (req.flags & KPERF_REQ_KERNEL_COUNTING) ? "user+kernel" : "user-only", (unsigned long long)unattributed);
+        for (uint32_t i = 0; i < req.num_events; i++) {
+            fprintf(stderr, "  %-32s PMC%u: %llu PMIs (%.1f%% in kernel, PMI flags 0x%llx), %llu stacks, %llu with precise PC (%.1f%%)\n",
+                    req.events[i].name, resp.counter[i], (unsigned long long)stats[i].pmis,
+                    stats[i].pmis ? 100.0 * stats[i].kernel_pmis / stats[i].pmis : 0.0,
+                    (unsigned long long)stats[i].flags_seen,
+                    (unsigned long long)stats[i].stacks, (unsigned long long)stats[i].precise,
+                    stats[i].stacks ? 100.0 * stats[i].precise / stats[i].stacks : 0.0);
+            fprintf(stderr, "  %-32s       weight by counter deltas %.1f%% of PMIs x period, %llu unmatched PMIs on our threads\n", "",
+                    stats[i].pmis ? 100.0 * stats[i].weight / ((double)stats[i].pmis * req.events[i].period) : 0.0,
+                    (unsigned long long)stats[i].unmatched);
+        }
+        fprintf(stderr, "  kdebug lost-events markers: %llu, samples without a PMI: %llu\n",
+                (unsigned long long)lost_markers, (unsigned long long)orphan_samples);
+        if (thread_counts) reportThreadCounts(&req, &resp);
+    }
+}
+
+// Waits for a connection for at most timeout_ms; returns -1 on timeout or error
+static int acceptWithTimeout(int s, int timeout_ms) {
+    struct pollfd pfd = {s, POLLIN, 0};
+    int r;
+    while ((r = poll(&pfd, 1, timeout_ms)) < 0 && errno == EINTR && !terminated);
+    return r > 0 ? accept(s, NULL, NULL) : -1;
+}
+
+int main(int argc, char** argv) {
+    const char* path = NULL;
+    uid_t uid = getenv("SUDO_UID") ? (uid_t)atoi(getenv("SUDO_UID")) : getuid();
+    pid_t target_pid = 0;
+    int opt;
+    while ((opt = getopt(argc, argv, "s:u:p:kt")) != -1) {
+        switch (opt) {
+            case 's': path = optarg; break;
+            case 'u': uid = (uid_t)atoi(optarg); break;
+            case 'p': target_pid = (pid_t)atoi(optarg); break;
+            case 'k': force_kernel = true; break;
+            case 't': thread_counts = true; break;
+            default: path = NULL; optind = argc; break;
+        }
+    }
+    if (path == NULL) {
+        fprintf(stderr, "Usage: sudo %s -s <socket path> [-u <uid> | -p <pid>] [-k] [-t]\n", argv[0]);
+        return 1;
+    }
+    if (!loadFrameworks()) return 1;
+    loadCaptureMasks();
+    int forced;
+    if (kpc_force_all_ctrs_get(&forced) != 0) {
+        fprintf(stderr, "Cannot access PMU: asprof-kperf must run as root\n");
+        return 1;
+    }
+
+    gid_t gid = (gid_t)-1;
+    if (target_pid != 0) {
+        struct proc_bsdinfo info;
+        if (proc_pidinfo(target_pid, PROC_PIDTBSDINFO, 0, &info, sizeof(info)) != sizeof(info)) {
+            fprintf(stderr, "Process %d not found\n", target_pid);
+            return 1;
+        }
+        uid = info.pbi_uid;
+        gid = info.pbi_gid;
+        verbose = false;
+    }
+
+    signal(SIGPIPE, SIG_IGN);
+    struct sigaction sa = {0};
+    sa.sa_handler = onSignal;  // no SA_RESTART: interrupt accept()
+    sigaction(SIGINT, &sa, NULL);
+    sigaction(SIGTERM, &sa, NULL);
+
+    int s = socket(AF_UNIX, SOCK_STREAM, 0);
+    struct sockaddr_un sun = {0};
+    sun.sun_family = AF_UNIX;
+    if (strlen(path) >= sizeof(sun.sun_path)) {
+        fprintf(stderr, "Socket path too long\n");
+        return 1;
+    }
+    strcpy(sun.sun_path, path);
+    unlink(path);
+    if (bind(s, (struct sockaddr*)&sun, sizeof(sun)) != 0 || listen(s, 1) != 0) {
+        perror(path);
+        return 1;
+    }
+    // Only the target user may connect
+    chmod(path, 0600);
+    if (chown(path, uid, gid) != 0) perror("chown");
+
+    if (target_pid != 0) {
+        // asprof places the socket in a private directory: hand it to the target user too
+        char dir[PATH_MAX];
+        strncpy(dir, path, sizeof(dir) - 1);
+        dir[sizeof(dir) - 1] = 0;
+        char* d = dirname(dir);
+        if (strcmp(d, "/tmp") != 0 && strcmp(d, "/") != 0 && chown(d, uid, gid) != 0) perror("chown");
+
+        // Detach: the caller continues once the socket is ready.
+        // A new session keeps Ctrl-C on the asprof terminal from tearing us down
+        // before the agent has stopped.
+        pid_t child = fork();
+        if (child < 0) {
+            perror("fork");
+            return 1;
+        } else if (child > 0) {
+            return 0;
+        }
+        setsid();
+
+        client_fd = acceptWithTimeout(s, 30000);
+        if (client_fd >= 0) {
+            serveClient(target_pid);
+            close(client_fd);
+        } else {
+            fprintf(stderr, "asprof-kperf: no connection from pid %d\n", target_pid);
+        }
+        close(s);
+        unlink(path);
+        if (strcmp(d, "/tmp") != 0 && strcmp(d, "/") != 0) rmdir(d);
+        return 0;
+    }
+
+    fprintf(stderr, "asprof-kperf listening on %s for uid %d\n", path, uid);
+    while (!terminated) {
+        client_fd = accept(s, NULL, NULL);
+        if (client_fd < 0) {
+            if (errno == EINTR) continue;
+            perror("accept");
+            break;
+        }
+        serveClient(0);
+        close(client_fd);
+        client_fd = -1;
+    }
+    close(s);
+    unlink(path);
+    return 0;
+}

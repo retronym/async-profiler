@@ -98,6 +98,10 @@ static const char USAGE_STRING[] =
     "  --libpath path      full path to libasyncProfiler.so in the container\n"
     "  --fdtransfer        run separate fdtransfer process to serve perf requests\n"
     "                      from the non-privileged target\n"
+    "  --kperf             (macOS) sample hardware counters via the asprof-kperf helper;\n"
+    "                      implied by cycles, instructions, cache-misses, branch-misses\n"
+    "                      and kpep event names such as L1D_CACHE_MISS_LD_NONSPEC.\n"
+    "                      Up to 4 events: -e cycles+cache-misses@20000\n"
     "  --target-cpu cpu    sample threads on a specific CPU (perf_events only, default: -1)\n"
     "\n"
     "<pid> is a numeric process ID of the target JVM\n"
@@ -221,6 +225,7 @@ class String {
 
 static String action = "collect";
 static String file, logfile, output, params, format, fdtransfer, libpath;
+static bool kperf = false;
 static bool jattach_action = false;
 static bool use_tmp_file = false;
 static int duration = 60;
@@ -361,6 +366,82 @@ static void run_fdtransfer(int pid, String& fdtransfer) {
     }
 }
 
+// On macOS, hardware counter events are sampled by the kernel (kperf) under the
+// control of a separate privileged helper, asprof-kperf, which streams stacks
+// to the agent over a unix socket. See research/kperf/DESIGN.md.
+static bool is_kperf_event_name(const char* event, size_t len) {
+    static const char* const aliases[] = {"cycles", "instructions", "cache-misses", "branch-misses"};
+    for (size_t i = 0; i < sizeof(aliases) / sizeof(aliases[0]); i++) {
+        if (strlen(aliases[i]) == len && strncmp(event, aliases[i], len) == 0) return true;
+    }
+    // kpep event names, e.g. L1D_CACHE_MISS_LD_NONSPEC
+    bool underscore = false;
+    for (size_t i = 0; i < len; i++) {
+        char c = event[i];
+        if (c == '_') underscore = true;
+        else if (!((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9'))) return false;
+    }
+    return underscore;
+}
+
+// EVENT[@PERIOD][+EVENT[@PERIOD]...]
+static bool is_kperf_event(const char* event) {
+    while (true) {
+        const char* end = strchr(event, '+');
+        size_t len = end != NULL ? (size_t)(end - event) : strlen(event);
+        const char* at = (const char*)memchr(event, '@', len);
+        if (!is_kperf_event_name(event, at != NULL ? (size_t)(at - event) : len)) return false;
+        if (end == NULL) return true;
+        event = end + 1;
+    }
+}
+
+static void run_kperf(int pid) {
+#ifdef __APPLE__
+    if (!kperf) return;
+    if (geteuid() != 0) {
+        error("Hardware counter events on macOS require root: run asprof with sudo");
+    }
+
+    char exe[PATH_MAX];
+    uint32_t size = sizeof(exe);
+    char* real = _NSGetExecutablePath(exe, &size) == 0 ? realpath(exe, NULL) : NULL;
+    char* slash = real != NULL ? strrchr(real, '/') : NULL;
+    if (slash == NULL) {
+        error("Cannot locate asprof-kperf");
+    }
+    slash[1] = 0;
+    String helper = String(real) << "asprof-kperf";
+    free(real);
+
+    // A private directory, handed over to the target user by the helper
+    char dir[] = "/tmp/asprof-kperf.XXXXXX";
+    if (mkdtemp(dir) == NULL) {
+        error("Cannot create directory for kperf socket", errno);
+    }
+    String sock = String(dir) << "/sock";
+    char pid_str[16];
+    snprintf(pid_str, sizeof(pid_str), "%d", pid);
+
+    pid_t child = fork();
+    if (child == -1) {
+        error("fork failed", errno);
+    } else if (child == 0) {
+        execl(helper.str(), "asprof-kperf", "-s", sock.str(), "-p", pid_str, (char*)NULL);
+        fprintf(stderr, "Cannot run %s: %s\n", helper.str(), strerror(errno));
+        _exit(127);
+    }
+
+    // The helper returns once its socket is ready, and serves the agent in the background
+    int ret = wait_for_exit(child);
+    if (ret != 0) {
+        rmdir(dir);
+        exit(WIFEXITED(ret) ? WEXITSTATUS(ret) : 1);
+    }
+    params << ",kperf=" << sock;
+#endif
+}
+
 static void run_jattach(int pid, String& cmd) {
     pid_t child = fork();
     if (child == -1) {
@@ -454,6 +535,9 @@ int main(int argc, const char** argv) {
                 params << ",event=trace:" << tracepoint_id;
             } else {
                 params << ",event=" << event;
+#ifdef __APPLE__
+                if (is_kperf_event(event)) kperf = true;
+#endif
             }
 
         } else if (arg == "-i" || arg == "--interval") {
@@ -537,6 +621,9 @@ int main(int argc, const char** argv) {
             fdtransfer = buf;
             params << ",fdtransfer=" << fdtransfer;
 
+        } else if (arg == "--kperf") {
+            kperf = true;
+
         } else if (arg.str()[0] >= '0' && arg.str()[0] <= '9' && pid == 0) {
             pid = atoi(arg.str());
 
@@ -575,6 +662,7 @@ int main(int argc, const char** argv) {
 
     if (action == "collect") {
         run_fdtransfer(pid, fdtransfer);
+        run_kperf(pid);
         run_jattach(pid, String("start,quiet,file=") << file << "," << output << format << params << ",log=" << logfile);
 
         fprintf(stderr, "Profiling for %d seconds\n", duration);
@@ -598,7 +686,10 @@ int main(int argc, const char** argv) {
 
         run_jattach(pid, String("stop,file=") << file << "," << output << format << ",log=" << logfile);
     } else {
-        if (action == "start" || action == "resume") run_fdtransfer(pid, fdtransfer);
+        if (action == "start" || action == "resume") {
+            run_fdtransfer(pid, fdtransfer);
+            run_kperf(pid);
+        }
         run_jattach(pid, String(action) << ",file=" << file << "," << output << format << params << ",log=" << logfile);
     }
 
