@@ -25,14 +25,16 @@ On this kind of machine, user-mode-only counting is an advantage rather than a g
 
 ## Profiles: where the cost is
 
+"kperf" below means this spike, not upstream async-profiler. Upstream has no hardware-counter events on macOS (async-profiler#182). The spike adds them via the `asprof-kperf` helper and the `KperfEvents` engine. It needs `sudo` (or a helper started with `sudo`) and `-XX:+PreserveFramePointer` in the target JVM. Without the spike, the only counter tools on a Mac are xctrace/Instruments: totals per thread (`-prof xctracenorm`) or leaf PCs (`-prof xctraceasm`), with no Java stacks for JIT code.
+
 | question | tool |
 |---|---|
-| Which code executes the most instructions / cycles (user mode)? | async-profiler `-e instructions` / `-e cycles` (kperf). Full Java stacks, including inlined frames. |
-| Which code misses cache or mispredicts branches? | async-profiler `-e cache-misses` / `-e branch-misses`. Precise PC: misses are attributed to the load or branch itself, without skid. |
-| Several at once, with ratios per stack | `-e cycles+instructions+cache-misses`, JFR output, `jfrconv --hw <event>` |
-| Where does CPU time go, including syscalls and page faults? | async-profiler `-e cpu` / `itimer` |
-| Where do threads wait (locks, I/O)? | async-profiler `-e wall` |
-| Leaf-PC annotation of hot JIT code only | JMH `-prof xctraceasm` |
+| Which code executes the most instructions / cycles (user mode)? | kperf: `-e instructions` / `-e cycles`. Full Java stacks, including inlined frames. |
+| Which code misses cache or mispredicts branches? | kperf: `-e cache-misses` / `-e branch-misses`. Precise PC: misses are attributed to the load or branch itself, without skid. |
+| Several at once, with ratios per stack | kperf: `-e cycles+instructions+cache-misses`, JFR output, `jfrconv --hw <event>` |
+| Where does CPU time go, including syscalls and page faults? | async-profiler `-e cpu` / `itimer` (upstream) |
+| Where do threads wait (locks, I/O)? | async-profiler `-e wall` (upstream) |
+| Leaf-PC annotation of hot JIT code only | JMH `-prof xctraceasm` (existing, no spike needed) |
 
 kperf events are user mode only. A kernel-heavy method looks cheap in a `cycles` profile. For scalac (`dottyUtil`), the kernel is roughly 5% of on-CPU cycles, measured as the fixed counters' cycles minus the user-only counters' cycles. Use `cpu` when syscalls or page faults are the suspect.
 
