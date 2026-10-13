@@ -154,7 +154,7 @@ The shuffle in `main` misses on its `next[j]` loads; with skid, ~15% of misses l
 
 - Counters count user mode only by default (EL0 A64 in each config word). `KPERF_KERNEL=1` in the agent, or `-k` on the helper, adds EL1 (`0x40000`).
 - kpep's config words carry no mode bits. On this machine that means **user mode only**, not all modes: with `-k` clearing the bits, the read-back was `0x2` and every PMI carried flag `0x4`. So every run so far, including the earlier "user+kernel" ones, counted user mode only. That's why kernel vs user-only made no difference.
-- XNU reports each PMI's counting mode in the `PERF_KPC_HNDLR` desc flags: `0x2` kernel counting, `0x4` user counting, `0x8` captured PC. The helper prints their union per event. User-only runs show `0x4` (`0xc` with PC capture), as expected. Setting EL1 explicitly for `-k` is not yet verified (expect flag `0x6`).
+- XNU reports each PMI's counting mode in the `PERF_KPC_HNDLR` desc flags: `0x2` kernel counting, `0x4` user counting, `0x8` captured PC. The helper prints their union per event. User-only runs show `0x4` (`0xc` with PC capture), as expected. Setting EL1 explicitly doesn't help either: the helper set `0x6`, but the read-back was `0x2` and the PMI flags `0x4`. XNU strips kernel counting, probably by policy on release kernels (the exact check hasn't been found). **Kernel counting is unavailable here**, and `-k` / `KPERF_KERNEL=1` are no-ops. xctrace goes through the same kernel, so it very likely counts user mode only too.
 - `kpc_get_config` read-back is unreliable: PMC 5/6 read back `0` whatever was set. The PMI flags are the trustworthy signal.
 - The "user+kernel" runs below were therefore also user-only.
 
@@ -179,9 +179,7 @@ The shuffle in `main` misses on its `next[j]` loads; with skid, ~15% of misses l
 | + `cache-misses`/`branch-misses` @100k / @10k, ×1 each | up to ~40k | 2.46 / 2.43 |
 
 - **The sampling period doesn't measurably change IPC.** 10x fewer PMIs moved IPC by ~2%, within run-to-run spread. Adding 230k miss PMIs didn't lower it either. The "kernel vs user-only" runs (both actually user-only) made no visible difference (2.25 vs 2.44 and 3.98 vs 3.89, single runs on two corpora).
-- **We read ~5% below xctrace, whatever the period.** Both tools sample `CORE_ACTIVE_CYCLE` and `INST_ALL`. There are two candidate explanations:
-  - The xctrace template's counting mode, which hasn't been decoded.
-  - Thread attribution. kperf counters run per CPU, so a PMI credited to the benchmark thread includes events from whatever else ran on that core since the last overflow (GC, other processes). That pulls the benchmark thread's IPC toward the machine average. xctrace uses exact per-thread counter deltas.
+- **We read ~5% below xctrace, whatever the period.** Both tools sample `CORE_ACTIVE_CYCLE` and `INST_ALL`, and both are very likely user-only. The leading explanation is thread attribution. kperf counters run per CPU, so a PMI credited to the benchmark thread includes events from whatever else ran on that core since the last overflow (GC, other processes). That pulls the benchmark thread's IPC toward the machine average. xctrace uses exact per-thread counter deltas.
 - **Earlier "low IPC" figures were mostly noise and conditions:** single runs, JDK 21 vs 25, shorter warmup, background load.
 - **JMH's async-profiler integration starts the profiler twice:** at the first warmup iteration, and again (`stop`, `start`) at the first measured iteration. Each fork therefore shows two helper sessions, and the second is the measured window.
 
@@ -195,5 +193,5 @@ The shuffle in `main` misses on its `next[j]` loads; with skid, ~15% of misses l
 6. **Verify the method at resolve time,** e.g. check it is still live at the sample's timestamp, or track compiled-method load and unload events.
 7. **Cheaper thread-id mapping.** Look up only the missing thread instead of re-listing all of them.
 8. **Kernel stacks** (`KPERF_SAMPLER_KSTACK`): cheap to collect, but need kernel symbolication.
-9. **Close the IPC gap to xctrace.** Verify `-k` with explicit EL1 (expect PMI flags `0x6`), then compare IPC with kernel counting on. Decode the xctrace template's counting mode. Try per-thread counting (`kpc_set_thread_counting`) to remove cross-thread contamination of PMI weights.
+9. **Close the IPC gap to xctrace.** Try per-thread counting (`kpc_set_thread_counting`) to remove cross-thread contamination of PMI weights.
 10. **Upstream hygiene:** automated tests gated on root and real hardware; docs in `CpuSamplingEngines.md`; signing and notarizing `asprof-kperf`; Intel Mac testing; a launchd-daemon option to avoid `sudo` per session.
