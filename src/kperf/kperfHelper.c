@@ -140,6 +140,8 @@ typedef struct {
 #define KPC_DESC_COUNTER(desc) (((desc) >> 32) & 0xffff)
 #define KPC_DESC_FLAGS(desc)   ((desc) >> 48)
 #define KPC_KERNEL_PC          0x01
+#define KPC_KERNEL_COUNTING    0x02
+#define KPC_USER_COUNTING      0x04
 #define KPC_CAPTURED_PC        0x08
 
 // arm64 kpc config word: counting modes (XNU osfmk/arm64/kpc.c). All zero means all modes.
@@ -461,7 +463,7 @@ static size_t outlen;
 static int client_fd = -1;
 
 static struct {
-    uint64_t pmis, kernel_pmis, stacks, precise;
+    uint64_t pmis, kernel_pmis, stacks, precise, flags_seen;
 } stats[KPERF_MAX_EVENTS];
 static uint64_t unattributed;
 
@@ -554,6 +556,7 @@ static bool handleEvent(const kd_buf* e) {
                 p->precise_pc[event] = (KPC_DESC_FLAGS(pmi->desc) & KPC_CAPTURED_PC) ? pmi->pc : 0;
                 stats[event].pmis++;
                 if (KPC_DESC_FLAGS(pmi->desc) & KPC_KERNEL_PC) stats[event].kernel_pmis++;
+                stats[event].flags_seen |= KPC_DESC_FLAGS(pmi->desc);
             }
             pmi->desc = 0;
         }
@@ -681,9 +684,10 @@ static void serveClient(pid_t expected_pid) {
         fprintf(stderr, "Stopped sampling pid %d (%s counting, %llu stacks without a PMI):\n", pid,
                 (req.flags & KPERF_REQ_KERNEL_COUNTING) ? "user+kernel" : "user-only", (unsigned long long)unattributed);
         for (uint32_t i = 0; i < req.num_events; i++) {
-            fprintf(stderr, "  %-32s PMC%u: %llu PMIs (%.1f%% in kernel), %llu stacks, %llu with precise PC (%.1f%%)\n",
+            fprintf(stderr, "  %-32s PMC%u: %llu PMIs (%.1f%% in kernel, PMI flags 0x%llx), %llu stacks, %llu with precise PC (%.1f%%)\n",
                     req.events[i].name, resp.counter[i], (unsigned long long)stats[i].pmis,
                     stats[i].pmis ? 100.0 * stats[i].kernel_pmis / stats[i].pmis : 0.0,
+                    (unsigned long long)stats[i].flags_seen,
                     (unsigned long long)stats[i].stacks, (unsigned long long)stats[i].precise,
                     stats[i].stacks ? 100.0 * stats[i].precise / stats[i].stacks : 0.0);
         }
