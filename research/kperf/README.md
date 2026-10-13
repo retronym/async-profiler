@@ -1,5 +1,7 @@
 # kperf PMI sampling prototype (macOS)
 
+For which metric and tool to use when benchmarking the compiler, see [WHICH-TOOL.md](WHICH-TOOL.md).
+
 ## Problem
 
 async-profiler has no hardware-counter events on macOS: there is no `perf_events`, and the PMU is only reachable via private frameworks (async-profiler#182). Instruments/xctrace can sample on counter overflow, but it cannot symbolize JIT frames and its output is awkward to consume. JMH's `XCTraceAsmProfiler` only attributes leaf PCs, not stacks.
@@ -154,7 +156,7 @@ The shuffle in `main` misses on its `next[j]` loads; with skid, ~15% of misses l
 
 - Counters count user mode only by default (EL0 A64 in each config word). `KPERF_KERNEL=1` in the agent, or `-k` on the helper, adds EL1 (`0x40000`).
 - kpep's config words carry no mode bits. On this machine that means **user mode only**, not all modes: with `-k` clearing the bits, the read-back was `0x2` and every PMI carried flag `0x4`. So every run so far, including the earlier "user+kernel" ones, counted user mode only. That's why kernel vs user-only made no difference.
-- XNU reports each PMI's counting mode in the `PERF_KPC_HNDLR` desc flags: `0x2` kernel counting, `0x4` user counting, `0x8` captured PC. The helper prints their union per event. User-only runs show `0x4` (`0xc` with PC capture), as expected. Setting EL1 explicitly doesn't help either: the helper set `0x6`, but the read-back was `0x2` and the PMI flags `0x4`. XNU strips kernel counting, probably by policy on release kernels (the exact check hasn't been found). **Kernel counting is unavailable here**, and `-k` / `KPERF_KERNEL=1` are no-ops. xctrace goes through the same kernel, so it very likely counts user mode only too.
+- XNU reports each PMI's counting mode in the `PERF_KPC_HNDLR` desc flags: `0x2` kernel counting, `0x4` user counting, `0x8` captured PC. The helper prints their union per event. User-only runs show `0x4` (`0xc` with PC capture), as expected. Setting EL1 explicitly doesn't help either: the helper set `0x6`, but the read-back was `0x2` and the PMI flags `0x4`. XNU strips kernel counting: `set_modes` in `osfmk/arm64/kpc.c` allows EL1 only if `kpc_allows_counting_system`, which is `PE_i_can_has_debugger()`, i.e. only with kernel debugging enabled. **Kernel counting is unavailable here**, and `-k` / `KPERF_KERNEL=1` are no-ops. xctrace goes through the same kernel, so it very likely counts user mode only too.
 - `kpc_get_config` read-back is unreliable: PMC 5/6 read back `0` whatever was set. The PMI flags are the trustworthy signal.
 - The "user+kernel" runs below were therefore also user-only.
 
@@ -191,7 +193,7 @@ The shuffle in `main` misses on its `next[j]` loads; with skid, ~15% of misses l
   - Crediting each PMI's whole period to the thread running at overflow is unbiased: per-thread IPC agrees within 1%.
   - In that run the helper missed some events: 3.5–4% in the measured window, and 9–12% during JIT-heavy warmup. Cycles and instructions lost about equally, so ratios held.
   - A rerun with loss diagnostics lost nothing: PMI-attributed counts were 99.9–100.4% of exact. That run had no kdebug lost-events markers and no unmatched PMIs on our threads. Weighting each PMI by its actual counter delta (the cumulative count in `PERF_KPC_HNDLR`) gave exactly 100% of PMIs × period, so overflows are never late or coalesced. The earlier loss was most likely kdebug buffer wrap, which drops PMI records while the exact counts (first/last snapshots) survive. The earlier build couldn't report it, and the helper now prints lost-events markers every session.
-  - The fixed counters (0/1) count 4.9% more cycles and 2.7% more instructions than the user-only configurable counters (IPC 2.575 vs 2.630). They apparently include kernel mode, which can't be enabled on the configurable counters.
+  - The fixed counters (0/1) count 4.9% more cycles and 2.7% more instructions than the user-only configurable counters (IPC 2.575 vs 2.630). They count all modes: `monotonic` owns them, and kpc sets their PMCR1 bits for EL0 and EL1 (`0x30303`). They can't be sampled, though: kpc's reload path programs periods for the configurable counters only. So kernel time is visible only in aggregate, as fixed minus configurable per thread.
 - **Earlier "low IPC" figures were mostly noise and conditions:** single runs, JDK 21 vs 25, shorter warmup, background load.
 - **JMH's async-profiler integration starts the profiler twice:** at the first warmup iteration, and again (`stop`, `start`) at the first measured iteration. Each fork therefore shows two helper sessions, and the second is the measured window.
 
