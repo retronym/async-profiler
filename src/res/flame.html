@@ -1109,12 +1109,14 @@ self.postMessage({progress:1.0,stage:'Done'});self.postMessage({result:newLevels
 				let x = newLeft[p];
 				for (const i of group) { kidLeft[i] = x; x += kids[i].width; }
 			}
-			for (let i = 0; i < kids.length; i++) newLevel.push({...kids[i], left: kidLeft[i] === undefined ? kids[i].left : kidLeft[i]});
-			const order = newLevel.map((_, i) => i).sort((a, b) => newLevel[a].left - newLevel[b].left);
-			out.push(order.map(i => newLevel[i]));
-			newLeft = order.map(i => newLevel[i].left);
-			// keep src[h] in the same order as out[h], so that newLeft lines up with the next level's parents
-			src = src.slice(); src[h] = order.map(i => kids[i]);
+			// src levels stay in their original (left) order for the sweeps; newLeft carries the new positions
+			for (let i = 0; i < kids.length; i++) {
+				if (kidLeft[i] === undefined) kidLeft[i] = kids[i].left;
+				newLevel.push({...kids[i], left: kidLeft[i]});
+			}
+			newLevel.sort((a, b) => a.left - b.left);
+			out.push(newLevel);
+			newLeft = kidLeft;
 		}
 		return out;
 	}
