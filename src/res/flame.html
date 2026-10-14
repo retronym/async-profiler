@@ -34,7 +34,7 @@
 	#canvas {width: 100%; height: /*height:*/300px; display: block}
 	#selbox {position: absolute; display: none; background: rgba(100,150,255,0.15); border: 1px solid rgba(100,150,255,0.7); pointer-events: none; box-sizing: border-box}
 	/* Active states for toggle buttons */
-	#search.active, #buview.active {background-color: var(--hl-bg); outline: 1px solid var(--hl-border); border-radius: 4px}
+	#search.active, #buview.active, #sortw.active, #shortn.active {background-color: var(--hl-bg); outline: 1px solid var(--hl-border); border-radius: 4px}
 	/* Bottom-up progress bar */
 	#buprogress {display: none; clear: left; padding: 3px 0 2px}
 	#buptrack {height: 4px; background: var(--hl-border); border-radius: 2px; margin-bottom: 2px; opacity: 0.4}
@@ -93,6 +93,8 @@
 <button id='search' title='Search — click to open/close (Ctrl+F, Esc)'><svg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='-39.3 -39.3 471.1 471.1'><circle cx='147.7' cy='147.8' r='125.9' fill='#fff'/><path fill='#40b2ff' d='M370.7 348.7c0 1.4-1.6 6.3-7.2 12.3-6.2 6.7-12.5 9.8-14.7 9.8h-.1c-19.5-1.6-62-43.2-109.6-106.8 9.2-7.2 17.5-15.5 24.6-24.6 63.6 47.6 105.2 90.2 106.8 109.6z'/><path fill='#ff8d40' d='M208.7 86.9l-14.5 14.5c-17.1 17.1-46.5 5-46.5-19.3V61.6c-49 0-88.4 40.8-86.1 90.2 2 43.9 38.1 80 82 82 49.5 2.3 90.2-37.2 90.2-86.1 0-23.7-9.6-45.2-25.1-60.8z'/><path fill='#004d80' d='M276.1 221c12.3-21.5 19.5-46.5 19.5-73.2C295.6 66.3 229.2.1 147.7.1S0 66.3 0 147.9s66.3 147.7 147.7 147.7c26.6 0 51.5-7.1 73.2-19.5 39.8 53.3 91.9 113.5 126.1 116.4 12.3.5 22.9-6.7 32.8-16.7 5.2-5.6 13.8-16.9 12.8-28.8-2.9-34.1-63.1-86.2-116.4-126.1zM147.7 273.8c-69.5 0-125.9-56.5-125.9-125.9S78.3 21.9 147.7 21.9 273.6 78.4 273.6 147.8s-56.4 126-125.9 126zm215.9 87.2c-6.2 6.7-12.4 9.8-14.7 9.8h-.1c-19.5-1.6-62-43.2-109.6-106.8 9.2-7.2 17.5-15.5 24.6-24.6 63.6 47.6 105.2 90.2 106.8 109.6 0 1.4-1.6 6.3-7.2 12.4z'/></svg></button>
 <button id='inverted' title='Invert (I)'><svg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 392 392'><path d='M196,36 L316,156 L76,156 Z' fill='#004d80'/><path d='M196,356 L76,236 L316,236 Z' fill='#004d80'/><path d='M196,54 L298,156 L94,156 Z' fill='#ff8d40'/><path d='M196,338 L94,236 L298,236 Z' fill='#40b2ff'/><rect x='94' y='188' width='204' height='16' fill='#004d80'/></svg></button>
 <button id='buview' title='Bottom-up view — regroup by leaf (executing) frames'><svg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 20 20'><rect x='2' y='14' width='16' height='3' rx='0.5' fill='#004d80'/><rect x='2' y='9.5' width='9' height='3' rx='0.5' fill='#004d80'/><rect x='12' y='9.5' width='6' height='3' rx='0.5' fill='#004d80'/><rect x='2' y='5' width='5' height='3' rx='0.5' fill='#004d80' opacity='0.55'/><rect x='8' y='5' width='3' height='3' rx='0.5' fill='#004d80' opacity='0.55'/><rect x='12' y='5' width='4' height='3' rx='0.5' fill='#004d80' opacity='0.55'/></svg></button>
+<button id='sortw' title='Sort by samples (W): children heaviest first instead of by name'><svg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 20 20'><rect x='2' y='14' width='16' height='3' rx='0.5' fill='#004d80'/><rect x='2' y='9.5' width='10' height='3' rx='0.5' fill='#ff8d40'/><rect x='13' y='9.5' width='5' height='3' rx='0.5' fill='#40b2ff'/><rect x='2' y='5' width='6' height='3' rx='0.5' fill='#ff8d40'/><rect x='9' y='5' width='3' height='3' rx='0.5' fill='#40b2ff'/></svg></button>
+<button id='shortn' title='Short names (S): drop package prefixes in frame labels; the tooltip keeps the full name'><svg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 20 20'><text x='1' y='14' font-size='10' font-family='monospace' fill='#004d80'>a.</text><text x='9' y='14' font-size='10' font-family='monospace' font-weight='bold' fill='#ff8d40'>C</text></svg></button>
 <button id='darkmode' title='Toggle dark mode (D)'><svg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 20 20'><path d='M10 4a6 6 0 0 1 0 12z' fill='#ff8d40'/><path d='M10 4a6 6 0 0 0 0 12z' fill='#ffffff'/><circle cx='10' cy='10' r='8' fill='none' stroke='#004d80'/></svg></button>
 <button id='info' title='Frame type legend and keyboard shortcuts'><svg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 20 20'><circle cx='10' cy='10' r='8' stroke='#004d80' fill='none'/><path d='M10 5.5c-1.25 0-2.25 1-2.25 2.25H9a1.25 1.25 0 0 1 2.5 0c0 .65-.55 1-1 1.2-.7.35-1.25.85-1.25 1.8V11h1.5v-.25c0-.37.29-.65.68-.83.73-.34 1.32-.87 1.32-2.17 0-1.25-1.5-2.25-2.75-2.25' fill='#ff8d40' stroke='#ff8d40' stroke-width='.6' stroke-linecap='round' stroke-linejoin='round'/><circle cx='10' cy='13.5' r='1.2' fill='#ff8d40'/></svg></button>
 <button id='zoomin' title='Zoom in (=)'><svg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 20 20'><circle cx='8' cy='8' r='5.5' stroke='#004d80' fill='none' stroke-width='1.5'/><line x1='12.4' y1='12.4' x2='17' y2='17' stroke='#004d80' stroke-width='2' stroke-linecap='round'/><line x1='5' y1='8' x2='11' y2='8' stroke='#004d80' stroke-width='1.5' stroke-linecap='round'/><line x1='8' y1='5' x2='8' y2='11' stroke='#004d80' stroke-width='1.5' stroke-linecap='round'/></svg></button>
@@ -383,6 +385,7 @@
 		updateFilterChips();
 		document.getElementById('restoreBtn').disabled = true;
 		zoomFactor = 1; panSamples = 0;
+		_reapplySort();
 		render(levels[0][0]);
 	}
 
@@ -446,7 +449,8 @@
 
 				if (f.width * px >= 21) {
 					const chars = Math.floor(f.width * px / 7);
-					const title = f.title.length <= chars ? f.title : f.title.substring(0, chars - 2) + '..';
+					const label = displayName(f.title);
+					const title = label.length <= chars ? label : label.substring(0, chars - 2) + '..';
 					c.fillStyle = '#000000';
 					c.fillText(title, Math.max(f.left - x0, 0) * px + 3, y + 12, f.width * px - 6);
 				}
@@ -666,7 +670,7 @@
 				hl.style.left = (Math.max(f.left - x0Rendered, 0) * px + canvas.offsetLeft) + 'px';
 				hl.style.width = (Math.min(f.width, root.width / zoomFactor) * px) + 'px';
 				hl.style.top = ((inverted ? h * 16 : canvasHeight - (h + 1) * 16) + canvas.offsetTop) + 'px';
-				hl.firstChild.textContent = f.title;
+				hl.firstChild.textContent = displayName(f.title);
 				hl.style.display = 'block';
 				canvas.title = f.title + '\n(' + samples(f.width) + f.details + ', ' + pct(f.width, levels[0][0].width) + '%)';
 				const canRemove = (event.altKey || event.ctrlKey) && h >= root.level && h > 0;
@@ -937,6 +941,12 @@
 		} else if (event.key === 'd') {
 			document.getElementById('darkmode').onclick();
 			return false;
+		} else if (event.key === 'w') {
+			document.getElementById('sortw').onclick();
+			return false;
+		} else if (event.key === 's') {
+			document.getElementById('shortn').onclick();
+			return false;
 		} else if (event.key === '0') {
 			canvas.onmouseout();
 			zoomFactor = 1; panSamples = 0;
@@ -992,10 +1002,17 @@ self.postMessage({progress:1.0,stage:'Done'});self.postMessage({result:newLevels
 		document.getElementById('restoreBtn').disabled = true;
 	}
 
+	function _reapplySort() {
+		if (!sortedByWeight) return;
+		unsortedLevels = levels.map(h => h.slice());
+		_swapLevels(sortLevelsByWeight(unsortedLevels));
+	}
+
 	function activateReverseView() {
 		reverseMode = true;
 		document.getElementById('buview').classList.add('active');
 		_swapLevels(reverseLevelsCache);
+		_reapplySort();
 		_resetView();
 		render(levels[0][0]);
 	}
@@ -1004,6 +1021,7 @@ self.postMessage({progress:1.0,stage:'Done'});self.postMessage({result:newLevels
 		reverseMode = false;
 		document.getElementById('buview').classList.remove('active');
 		_swapLevels(originalLevels);
+		_reapplySort();
 		_resetView();
 		render(levels[0][0]);
 	}
@@ -1046,6 +1064,79 @@ self.postMessage({progress:1.0,stage:'Done'});self.postMessage({result:newLevels
 		else computeReverseView();
 	};
 
+	// ── Short names ───────────────────────────────────────────────────────────
+	// Frame labels without the package: `dotty/tools/dotc/core/Types$TypeMap.mapOver` (or dotted) shows as
+	// `Types$TypeMap.mapOver`. Display only: search, filters and the tooltip use the full name. Remembered.
+	let shortNames = false;
+	try { shortNames = !!localStorage.getItem('flame-short-names'); } catch (ignored) {}
+	document.getElementById('shortn').classList.toggle('active', shortNames);
+
+	function displayName(t) {
+		if (!shortNames) return t;
+		const paren = t.indexOf('(');
+		const head = paren >= 0 ? t.substring(0, paren) : t;
+		const m = head.match(/^(?:[a-z_][\w]*[\/.])+([A-Z_$][^\/]*)$/);
+		return m ? m[1] + (paren >= 0 ? t.substring(paren) : '') : t;
+	}
+
+	document.getElementById('shortn').onclick = function() {
+		shortNames = !shortNames;
+		this.classList.toggle('active', shortNames);
+		try { localStorage.setItem('flame-short-names', shortNames ? '1' : ''); } catch (ignored) {}
+		render(root);
+	};
+
+	// ── Sort by samples ───────────────────────────────────────────────────────
+	// Lays the current tree out again with each frame's children ordered by width (heaviest first) instead of by
+	// name, still starting at the parent's left edge. Works for forward and reverse graphs. The order is remembered.
+	let sortedByWeight = false;
+	let unsortedLevels = null;
+
+	function sortLevelsByWeight(src) {
+		const out = [];
+		// newLeft[i]: the new left edge of src[h-1][i]
+		let newLeft = src[0].map(fr => fr.left);
+		out.push(src[0].map(fr => ({...fr})));
+		for (let h = 1; h < src.length; h++) {
+			const parents = src[h - 1], kids = src[h], kidLeft = new Array(kids.length), newLevel = [];
+			// the children of each parent, found by sweeping both levels left to right
+			let k = 0;
+			for (let p = 0; p < parents.length; p++) {
+				const par = parents[p], end = par.left + par.width, group = [];
+				while (k < kids.length && kids[k].left < par.left) k++;
+				while (k < kids.length && kids[k].left < end) group.push(k++);
+				group.sort((a, b) => kids[b].width - kids[a].width);
+				let x = newLeft[p];
+				for (const i of group) { kidLeft[i] = x; x += kids[i].width; }
+			}
+			for (let i = 0; i < kids.length; i++) newLevel.push({...kids[i], left: kidLeft[i] === undefined ? kids[i].left : kidLeft[i]});
+			const order = newLevel.map((_, i) => i).sort((a, b) => newLevel[a].left - newLevel[b].left);
+			out.push(order.map(i => newLevel[i]));
+			newLeft = order.map(i => newLevel[i].left);
+			// keep src[h] in the same order as out[h], so that newLeft lines up with the next level's parents
+			src = src.slice(); src[h] = order.map(i => kids[i]);
+		}
+		return out;
+	}
+
+	function setSortByWeight(on) {
+		if (on === sortedByWeight) return;
+		sortedByWeight = on;
+		document.getElementById('sortw').classList.toggle('active', on);
+		try { localStorage.setItem('flame-sort-weight', on ? '1' : ''); } catch (ignored) {}
+		if (on) {
+			unsortedLevels = levels.map(h => h.slice());
+			_swapLevels(sortLevelsByWeight(unsortedLevels));
+		} else if (unsortedLevels) {
+			_swapLevels(unsortedLevels);
+			unsortedLevels = null;
+		}
+		_resetView();
+		render(levels[0][0]);
+	}
+
+	document.getElementById('sortw').onclick = function() { setSortByWeight(!sortedByWeight); };
+
 
 const cpool = [
 /*cpool:*/
@@ -1058,4 +1149,5 @@ render(levels[0][0]);
 
 // Snapshot original frame data so removed stacks can be restored
 const originalLevels = levels.map(h => h.map(fr => ({...fr})));
+{ let w = ''; try { w = localStorage.getItem('flame-sort-weight'); } catch (ignored) {} if (w) setSortByWeight(true); }
 </script></body></html>
