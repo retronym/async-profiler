@@ -64,7 +64,9 @@ abstract class Classifier {
                         break;
                 }
             } else if (types[i] != TYPE_NATIVE) {
-                break;
+                // A Java frame above the thread entry: a Java thread, whose stack starts at
+                // thread_native_entry when native frames are walked through the VM (cstack=vm)
+                return null;
             }
         }
         return vmThread ? Category.VM : null;
