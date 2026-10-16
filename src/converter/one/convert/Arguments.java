@@ -13,6 +13,7 @@ import java.util.regex.Pattern;
 public class Arguments {
     public String title;
     public String highlight;
+    public String spanConfig;
     public String output;
     public String state;
     public String hw;

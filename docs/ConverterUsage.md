@@ -64,6 +64,8 @@ JFR options:
  -s --state LIST       Filter thread states: runnable, sleeping, default. State name is case insensitive
                        and can be abbreviated, e.g. -s r
     --classify         Classify samples into predefined categories
+    --spans            Add the tags of the enclosing spans (outermost first) as a leaf frame, for the span panel
+    --span-config JSON How the span panel groups the span paths: a JSON object or a file (see below)
     --total            Accumulate total value (time, bytes, etc.) instead of samples
     --lines            Show line numbers
     --bci              Show bytecode indices
@@ -97,6 +99,23 @@ Flame Graph options:
 ```
 
 See the [profiler options documentation](ProfilerOptions.md#options-applicable-to-flamegraph-and-tree-view-outputs-only) for details on the `--reverse` and `--inverted` options.
+
+With `--spans`, the HTML Flame Graph has a span panel listing the spans of the samples under the hovered frame: the path of span tags enclosing each sample, outermost first, `' > '` separated. By default it groups them by the innermost span, the outermost, the span at each level, or the full path. `--span-config` names groupings that suit how an application nests its spans, e.g. for spans of compiler phase, compilation unit, then classes and members, with `implicit` and `inline` spans marking a kind of work:
+
+```
+{
+  "markers": ["implicit", "inline"],
+  "groups": [
+    {"label": "definition, with owners", "by": "path", "from": 2, "skipMarkers": true},
+    {"label": "definition", "by": "innermost", "skipMarkers": true},
+    {"label": "innermost span", "by": "innermost"},
+    {"label": "phase", "by": "level", "level": 0},
+    {"label": "unit", "by": "level", "level": 1}
+  ]
+}
+```
+
+A grouping is `by` the `innermost` span, the span at a `level` (0 for the outermost), or the `path` from a level on; `skipMarkers` passes over the marker spans. Clicking a group in the panel keeps only its samples, including, for a path, those of the spans nested in it.
 
 ## jfrconv examples
 

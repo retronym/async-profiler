@@ -31,12 +31,15 @@
 	#status {left: 0}
 	#toolbar {position: sticky; top: 0; z-index: 10; background: var(--bg)}
 	/* Span panel (--spans): where the samples under the hovered frame were taken, by span tag */
-	#spanpanel {position: fixed; right: 12px; bottom: 28px; z-index: 20; width: 460px; max-height: 60vh; overflow: auto; display: none; background: var(--legend-bg); border: 1px solid var(--legend-border); border-radius: 4px; padding: 6px 8px; font-size: 11px; box-shadow: 0 2px 8px rgba(0,0,0,0.2)}
+	#spanpanel {position: fixed; right: 12px; bottom: 28px; z-index: 20; width: 560px; max-height: 60vh; overflow: auto; display: none; background: var(--legend-bg); border: 1px solid var(--legend-border); border-radius: 4px; padding: 6px 8px; font-size: 11px; box-shadow: 0 2px 8px rgba(0,0,0,0.2)}
 	#spanpanel.open {display: block}
 	#spanhead {display: flex; gap: 6px; align-items: baseline; margin-bottom: 4px}
 	#spantitle {flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: bold}
 	#spangroup {font: 11px Verdana, sans-serif; background: var(--bg); color: var(--fg); border: 1px solid var(--legend-border)}
-	.spanrow {display: grid; grid-template-columns: 1fr 52px 40px; gap: 4px; align-items: center; padding: 1px 0}
+	.spanrow {display: grid; grid-template-columns: 1fr 50px 40px 40px 40px; gap: 4px; align-items: center; padding: 1px 0}
+	.spanheadrow {font-size: 10px; opacity: 0.6; cursor: default}
+	.spanheadrow .spannum {font-family: inherit}
+	#spanfilter {width: 90px; font: 11px Verdana, sans-serif; background: var(--bg); color: var(--fg); border: 1px solid var(--legend-border); padding: 0 3px}
 	.spanname {position: relative; z-index: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 1px 3px; cursor: pointer}
 	.spanbar {position: absolute; left: 0; top: 0; bottom: 0; background: #e17d00; opacity: 0.35; z-index: -1}
 	.spannum {text-align: right; font-family: monospace}
@@ -195,8 +198,7 @@
 <div id='hl'><span></span></div>
 <div id='selbox'></div>
 <p id='status'></p>
-<div id='spanpanel'><div id='spanhead'><span id='spantitle'></span><select id='spangroup' title='Group the samples by'>
-<option value='chain'>definition, with owners</option><option value='definition'>definition</option><option value='innermost'>innermost span</option><option value='0'>outermost (phase)</option><option value='1'>level 2 (unit)</option><option value='2'>level 3 (class)</option></select><button id='spanhide' title='Hide the panel (the Spans button brings it back)'>&#x2013;</button></div><div id='spanrows'></div><div id='spanhint'>Click a span to keep only its samples (a filter, with nested spans for &ldquo;definition, with owners&rdquo;); Shift+click to highlight it.</div></div>
+<div id='spanpanel'><div id='spanhead'><span id='spantitle'></span><input id='spanfilter' type='text' placeholder='filter' autocomplete='off' spellcheck='false' title='Show only the spans containing this text'><select id='spangroup' title='Group the samples by'></select><button id='spanhide' title='Hide the panel (the Spans button brings it back)'>&#x2013;</button></div><div id='spanrows'></div><div id='spanhint'>Click a span to keep only its samples (a filter; a path also keeps the spans nested in it); Shift+click to highlight it.</div></div>
 <script>
 	// Copyright The async-profiler authors
 	// SPDX-License-Identifier: Apache-2.0
@@ -302,32 +304,50 @@
 
 	// ── Span panel ──────────────────────────────────────────────────────────────
 	// The span leaf of a sample is the path of spans enclosing it, outermost first, ' > ' separated
-	// (e.g. 'typer > Foo.scala > Foo > bar > implicit'): group by its innermost or outermost span, by a level, or by
-	// definition (the innermost span that is not a constant marker such as 'implicit' or 'inline').
-	const SPAN_MARKERS = new Set(['implicit', 'inline']);
+	// (e.g. 'typer > Foo.scala > Foo > bar > implicit'). The panel groups the samples by a grouping:
+	//   {by: 'innermost'}           the innermost span
+	//   {by: 'level', level: N}     the span at level N (0: the outermost)
+	//   {by: 'path', from: N}       the path from level N on; a path's group also holds the paths nested in it
+	// with a `label`, and `skipMarkers: true` to pass over the marker spans (constant spans, such as a kind of work,
+	// rather than names). The converter can name the groupings and markers for its spans (--span-config):
+	//   {"markers": [...], "groups": [{"label": ..., "by": ..., ...}, ...]}
+	const spanConfig = /*spanconfig:*/null || {};
+	const SPAN_MARKERS = new Set(spanConfig.markers || []);
+	let spanGroups = null;  // the groupings, built on first use; a grouping is referred to by its index
+	function initSpanGroups() {
+		if (spanConfig.groups) return spanGroups = spanConfig.groups;
+		let depth = 1;
+		const seen = new Set();
+		for (const lv of levels) for (const fr of lv) if (fr.spans) for (let j = 0; j < fr.spans.length; j += 2) {
+			if (!seen.has(fr.spans[j])) { seen.add(fr.spans[j]); depth = Math.max(depth, cpool[fr.spans[j]].split(' > ').length); }
+		}
+		spanGroups = [{label: 'innermost span', by: 'innermost'}, {label: 'outermost span', by: 'level', level: 0}];
+		for (let i = 1; i < Math.min(depth, 8); i++) spanGroups.push({label: 'level ' + (i + 1), by: 'level', level: i});
+		spanGroups.push({label: 'full path', by: 'path', from: 0});
+		return spanGroups;
+	}
+
 	const spanKeys = {};  // grouping -> cpool index -> key
 	function spanKeyOf(idx, by) {
 		const keys = spanKeys[by] || (spanKeys[by] = []);
 		const k = keys[idx];
-		return k !== undefined ? k : (keys[idx] = spanKey(cpool[idx], by));
+		return k !== undefined ? k : (keys[idx] = spanKey(cpool[idx], spanGroups[by]));
 	}
-	function spanKey(tag, by) {
+	function spanKey(tag, g) {
 		const parts = tag.split(' > ');
-		if (by === 'innermost') return parts[parts.length - 1];
-		if (by === 'chain') {
-			// the definition with its enclosing classes and members: the path after phase and unit, without markers
-			const chain = parts.slice(2).filter(p => !SPAN_MARKERS.has(p));
-			return chain.length ? chain.join(' > ') : parts.slice(0, 2).join(' > ');
-		}
-		if (by === 'definition') {
-			for (let i = parts.length - 1; i >= 0; i--) if (!SPAN_MARKERS.has(parts[i])) return parts[i];
+		const named = p => !g.skipMarkers || !SPAN_MARKERS.has(p);
+		if (g.by === 'innermost') {
+			for (let i = parts.length - 1; i >= 0; i--) if (named(parts[i])) return parts[i];
 			return parts[0];
 		}
-		const level = +by;
-		return level < parts.length ? parts[level] : '(none)';
+		if (g.by === 'path') {
+			const from = g.from || 0, path = parts.slice(from).filter(named);
+			return path.length ? path.join(' > ') : parts.slice(0, from).join(' > ');
+		}
+		return g.level < parts.length ? parts[g.level] : '(none)';
 	}
 
-	// Whether the span path at cpool index `idx` belongs to the group `key` under grouping `by`; with owners, nested
+	// Whether the span path at cpool index `idx` belongs to the group `key` under grouping `by`; for a path, nested
 	// spans belong too. Memoized for the last (by, key).
 	let spanMatchFor = null, spanMatchMemo = [];
 	function spanMatches(idx, by, key) {
@@ -335,7 +355,7 @@
 		const m = spanMatchMemo[idx];
 		if (m !== undefined) return m;
 		const k = spanKeyOf(idx, by);
-		return spanMatchMemo[idx] = k === key || (by === 'chain' && k.startsWith(key + ' > '));
+		return spanMatchMemo[idx] = k === key || (spanGroups[by].by === 'path' && k.startsWith(key + ' > '));
 	}
 
 	// Per frame: the samples of its own spans that match, and of its subtree (frames are matched to parents by
@@ -439,6 +459,7 @@
 		if (!spanButtonShown) {
 			spanButtonShown = true;
 			document.getElementById('spanbtn').style.display = 'inline-block';
+			initSpanGroupSelect();
 			setSpanPanelOpen(spanPanelOpen);
 		}
 		if (!spanPanelOpen) return;
@@ -454,12 +475,21 @@
 		let sum = 0;
 		const frames = target.matches || [target];
 		for (const fr of frames) sum += addSpans(fr, by, totals);
-		const top = [...totals.entries()].sort((x, y) => y[1] - x[1]).slice(0, 25);
-		const max = top.length ? top[0][1] : 1;
+		const text = document.getElementById('spanfilter').value.toLowerCase();
+		const all = [...totals.entries()].filter(([k]) => !text || k.toLowerCase().includes(text)).sort((x, y) => y[1] - x[1]);
+		const top = all.slice(0, 25);
 		const what = target.matches ? 'search \u201c' + document.getElementById('searchinput').value + '\u201d (' + frames.length + ' matches)' : displayName(target.title);
-		document.getElementById('spantitle').textContent = what + ' \u2014 ' + samples(sum) + ' in ' + totals.size + ' spans';
+		document.getElementById('spantitle').textContent = what + ' \u2014 ' + samples(sum) + ' in ' + totals.size + ' spans' +
+			(text ? ', ' + all.length + ' shown' : '');
 		document.getElementById('spantitle').title = target.matches ? pattern.source : target.title;
-		drawSpanRows(top, max, sum);
+		drawSpanRows(top, sum);
+	}
+
+	// A long span shortened for the list: a {...} list to its first item, anything else to its ends
+	function shortSpan(s) {
+		const brace = s.indexOf('{');
+		if (brace > 0 && s.endsWith('}') && s.indexOf(',', brace) > 0) s = s.substring(0, s.indexOf(',', brace)) + '\u2026}';
+		return s.length <= 48 ? s : s.substring(0, 30) + '\u2026' + s.substring(s.length - 17);
 	}
 
 	// Adds the span samples under `fr` to `totals`, keyed by spanKey; returns their sum
@@ -484,28 +514,39 @@
 		return sum;
 	}
 
-	function drawSpanRows(top, max, sum) {
+	// Each row: the group, its samples, and their share of the samples listed, of the current root (zoomed into or
+	// filtered) and of the whole profile
+	function drawSpanRows(top, sum) {
 		const rows = document.getElementById('spanrows');
 		rows.textContent = '';
+		const max = top.length ? top[0][1] : 1, all = originalLevels[0][0].width;
+		const cell = (text, title) => {
+			const c = document.createElement('span');
+			c.className = 'spannum';
+			c.textContent = text;
+			if (title) c.title = title;
+			return c;
+		};
+		const head = document.createElement('div');
+		head.className = 'spanrow spanheadrow';
+		head.append(cell(''), cell('samples'), cell('here', 'Share of the samples listed'),
+			cell('root', 'Share of the current root (zoomed into or filtered): ' + samples(root.width)),
+			cell('total', 'Share of the whole profile: ' + samples(all)));
+		rows.appendChild(head);
+		const share = (v, of) => (100 * v / (of || 1)).toFixed(1) + '%';
 		for (const [k, v] of top) {
 			const row = document.createElement('div');
 			row.className = 'spanrow';
 			const name = document.createElement('span');
 			name.className = 'spanname';
-			name.title = k;
 			const bar = document.createElement('span');
 			bar.className = 'spanbar';
 			bar.style.width = (100 * v / max) + '%';
 			name.appendChild(bar);
-			name.appendChild(document.createTextNode(k));
-			const n = document.createElement('span');
-			n.className = 'spannum';
-			n.textContent = v.toLocaleString();
-			const p = document.createElement('span');
-			p.className = 'spannum';
-			p.textContent = (100 * v / (sum || 1)).toFixed(1) + '%';
-			row.append(name, n, p);
-			row.title = 'Click: keep only these samples. Shift+click: highlight';
+			name.appendChild(document.createTextNode(k.split(' > ').map(shortSpan).join(' > ')));
+			row.append(name, cell(v.toLocaleString()), cell(share(v, sum)), cell(share(v, root.width)), cell(share(v, all)));
+			row.title = k + '\n' + samples(v) + ': ' + share(v, sum) + ' of these, ' + share(v, root.width) + ' of the root, ' +
+				share(v, all) + ' of the profile\nClick: keep only these samples. Shift+click: highlight';
 			row.onclick = (e) => {
 				const by = document.getElementById('spangroup').value;
 				if (e.shiftKey) addSpanHighlight(by, k); else keepOnlySpans(by, k);
@@ -514,7 +555,25 @@
 		}
 	}
 
-	document.getElementById('spangroup').onchange = () => drawSpanPanel(spanPanelTarget || root);
+	// The grouping is remembered by its label
+	function initSpanGroupSelect() {
+		const select = document.getElementById('spangroup');
+		let saved = null;
+		try { saved = localStorage.getItem('flame-spangroup'); } catch (ignored) {}
+		initSpanGroups().forEach((g, i) => {
+			const o = document.createElement('option');
+			o.value = i;
+			o.textContent = g.label;
+			o.selected = g.label === saved;
+			select.appendChild(o);
+		});
+	}
+	document.getElementById('spangroup').onchange = function() {
+		try { localStorage.setItem('flame-spangroup', spanGroups[this.value].label); } catch (ignored) {}
+		drawSpanPanel(spanPanelTarget || root);
+	};
+	document.getElementById('spanfilter').oninput = () => drawSpanPanel(spanPanelTarget || root);
+	document.getElementById('spanfilter').onkeydown = (e) => e.stopPropagation();  // not the page's shortcuts
 
 	function samples(n) {
 		return n === 1 ? '1 sample' : n.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',') + ' samples';
