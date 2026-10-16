@@ -307,18 +307,32 @@
 		return seg;
 	}
 
-	let spanPanelFrame = null, spanPanelPending = false;
+	// What the panel covers: a frame (hovered, or the zoom root), or the search's matches
+	let spanPanelTarget = null, spanPanelPending = false;
 	function updateSpanPanel(fr) {
 		if (!hasSpans || !fr) return;
-		spanPanelFrame = fr;
+		spanPanelTarget = fr === root && pattern && nav && nav.length ? {matches: nav} : fr;
 		if (spanPanelPending) return;
 		spanPanelPending = true;
-		requestAnimationFrame(() => { spanPanelPending = false; drawSpanPanel(spanPanelFrame); });
+		requestAnimationFrame(() => { spanPanelPending = false; drawSpanPanel(spanPanelTarget); });
 	}
 
-	function drawSpanPanel(fr) {
+	function drawSpanPanel(target) {
 		const by = document.getElementById('spangroup').value;
 		const totals = new Map();
+		let sum = 0;
+		const frames = target.matches || [target];
+		for (const fr of frames) sum += addSpans(fr, by, totals);
+		const top = [...totals.entries()].sort((x, y) => y[1] - x[1]).slice(0, 25);
+		const max = top.length ? top[0][1] : 1;
+		const what = target.matches ? 'search \u201c' + document.getElementById('searchinput').value + '\u201d (' + frames.length + ' matches)' : displayName(target.title);
+		document.getElementById('spantitle').textContent = what + ' \u2014 ' + samples(sum) + ' in ' + totals.size + ' spans';
+		document.getElementById('spantitle').title = target.matches ? pattern.source : target.title;
+		drawSpanRows(top, max, sum);
+	}
+
+	// Adds the span samples under `fr` to `totals`, keyed by spanKey; returns their sum
+	function addSpans(fr, by, totals) {
 		let sum = 0;
 		const lo = fr.left, hi = fr.left + fr.width;
 		for (let h = fr.level; h < levels.length; h++) {
@@ -336,10 +350,10 @@
 				}
 			}
 		}
-		const top = [...totals.entries()].sort((x, y) => y[1] - x[1]).slice(0, 25);
-		const max = top.length ? top[0][1] : 1;
-		document.getElementById('spantitle').textContent = displayName(fr.title) + ' — ' + samples(sum) + ' in ' + totals.size + ' spans';
-		document.getElementById('spantitle').title = fr.title;
+		return sum;
+	}
+
+	function drawSpanRows(top, max, sum) {
 		const rows = document.getElementById('spanrows');
 		rows.textContent = '';
 		for (const [k, v] of top) {
@@ -365,7 +379,7 @@
 		document.getElementById('spanpanel').classList.add('open');
 	}
 
-	document.getElementById('spangroup').onchange = () => drawSpanPanel(spanPanelFrame || root);
+	document.getElementById('spangroup').onchange = () => drawSpanPanel(spanPanelTarget || root);
 
 	function samples(n) {
 		return n === 1 ? '1 sample' : n.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',') + ' samples';
@@ -737,6 +751,7 @@
 		}
 		pattern = pat;
 		const matched = render(root, nav = []);
+		updateSpanPanel(root);
 		navIndex = -1;
 		const matchpct = document.getElementById('matchpct');
 		if (r) {
