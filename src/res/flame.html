@@ -549,10 +549,14 @@
 		if (grp) e.shiftKey ? addSpanHighlight(by, grp[0]) : keepOnlySpans(by, grp[0]);
 	};
 
-	// A long span shortened for the list: a {...} list to its first item, anything else to its ends
+	// A long span shortened for the list: a {...} list to its first item, a file path to its last two names,
+	// anything else to its ends
 	function shortSpan(s) {
 		const brace = s.indexOf('{');
 		if (brace > 0 && s.endsWith('}') && s.indexOf(',', brace) > 0) s = s.substring(0, s.indexOf(',', brace)) + '\u2026}';
+		if (s.length <= 48) return s;
+		const names = s.split('/');
+		if (names.length > 2) s = '\u2026/' + names.slice(-2).join('/');
 		return s.length <= 48 ? s : s.substring(0, 30) + '\u2026' + s.substring(s.length - 17);
 	}
 	function shortSpanPath(path) {
