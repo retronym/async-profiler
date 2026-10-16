@@ -138,7 +138,7 @@ public abstract class JfrConverter extends Classifier {
                 if (threadStates == null || threadStates.get(((ExecutionSample) event).threadState)) {
                     if (filter == null || filter.matches(event.tid, jfr.eventTimeToNanos(event.time))) {
                         if (spans != null) {
-                            String tag = spans.tagAt(event.tid, jfr.eventTimeToNanos(event.time));
+                            String tag = spans.pathAt(event.tid, jfr.eventTimeToNanos(event.time));
                             collector.collect(new Spans.TaggedEvent(event, tag != null ? tag : "[no span]"));
                         } else {
                             collector.collect(event);

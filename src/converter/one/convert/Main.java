@@ -153,7 +153,7 @@ public class Main {
                 "  -t --threads          Split stack traces by threads\n" +
                 "  -s --state LIST       Filter thread states: runnable, sleeping\n" +
                 "     --classify         Classify samples into predefined categories\n" +
-                "     --spans            Add the tag of the innermost enclosing span as a leaf frame, for the span panel\n" +
+                "     --spans            Add the tags of the enclosing spans (outermost first) as a leaf frame, for the span panel\n" +
                 "     --total            Accumulate total value (time, bytes, etc.)\n" +
                 "     --lines            Show line numbers\n" +
                 "     --bci              Show bytecode indices\n" +

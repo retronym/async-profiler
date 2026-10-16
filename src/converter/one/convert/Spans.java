@@ -14,13 +14,11 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * The spans of each thread, to find the innermost span enclosing a sample: the one with the latest start
- * among those that contain the sample's time.
+ * The spans of each thread, to tag a sample with the path of spans enclosing it, outermost first, ' > ' separated.
+ * Spans on one thread are taken to nest (a span that starts inside another ends inside it), as spans recorded
+ * around nested regions of code do.
  */
 final class Spans {
-    // How far back to look for an enclosing span, past spans that ended before the sample
-    private static final int MAX_LOOKBACK = 64;
-
     private final Map<Integer, ThreadSpans> byThread = new HashMap<>();
     private final Map<Integer, List<long[]>> pending = new HashMap<>();
     private final List<String> tags = new ArrayList<>();
@@ -35,45 +33,64 @@ final class Spans {
     }
 
     void build() {
-        pending.forEach((tid, spans) -> byThread.put(tid, new ThreadSpans(spans)));
+        pending.forEach((tid, spans) -> byThread.put(tid, new ThreadSpans(spans, tags)));
         pending.clear();
     }
 
-    /** The tag of the innermost span on thread `tid` enclosing `timeNanos`, or null */
-    String tagAt(int tid, long timeNanos) {
+    /** The path of the spans on thread `tid` enclosing `timeNanos`, or null if there are none */
+    String pathAt(int tid, long timeNanos) {
         ThreadSpans s = byThread.get(tid);
-        if (s == null) return null;
-        int id = s.innermost(timeNanos);
-        return id < 0 ? null : tags.get(id);
+        return s == null ? null : s.pathAt(timeNanos);
     }
 
     private static final class ThreadSpans {
         final long[] starts;
         final long[] ends;
         final int[] tags;
+        final int[] parents;  // index of the innermost span enclosing each span, or -1
+        final String[] paths;  // built on first use
+        final List<String> tagNames;
 
-        ThreadSpans(List<long[]> spans) {
-            spans.sort((a, b) -> Long.compare(a[0], b[0]));
+        ThreadSpans(List<long[]> spans, List<String> tagNames) {
+            // by start, the longer (outer) span first when two start together
+            spans.sort((a, b) -> a[0] != b[0] ? Long.compare(a[0], b[0]) : Long.compare(b[1], a[1]));
             int n = spans.size();
             starts = new long[n];
             ends = new long[n];
             tags = new int[n];
+            parents = new int[n];
+            paths = new String[n];
+            this.tagNames = tagNames;
+            int[] open = new int[n];
+            int depth = 0;
             for (int i = 0; i < n; i++) {
                 long[] s = spans.get(i);
                 starts[i] = s[0];
                 ends[i] = s[1];
                 tags[i] = (int) s[2];
+                while (depth > 0 && ends[open[depth - 1]] < s[0]) depth--;
+                parents[i] = depth > 0 ? open[depth - 1] : -1;
+                open[depth++] = i;
             }
         }
 
-        int innermost(long t) {
+        String pathAt(long t) {
+            // The last span starting at or before t encloses it, or one of its ancestors does: a span that starts
+            // earlier and contains t also contains that span's start, so (spans nesting) it encloses that span
             int i = Arrays.binarySearch(starts, t);
-            if (i < 0) i = -i - 2;  // the last span starting at or before t
+            if (i < 0) i = -i - 2;
             else while (i + 1 < starts.length && starts[i + 1] == t) i++;
-            for (int k = 0; i >= 0 && k < MAX_LOOKBACK; i--, k++) {
-                if (ends[i] >= t) return tags[i];
+            while (i >= 0 && ends[i] < t) i = parents[i];
+            return i < 0 ? null : path(i);
+        }
+
+        private String path(int i) {
+            String p = paths[i];
+            if (p == null) {
+                String tag = tagNames.get(tags[i]);
+                p = paths[i] = parents[i] < 0 ? tag : path(parents[i]) + " > " + tag;
             }
-            return -1;
+            return p;
         }
     }
 

@@ -191,7 +191,7 @@
 <div id='selbox'></div>
 <p id='status'></p>
 <div id='spanpanel'><div id='spanhead'><span id='spantitle'></span><select id='spangroup' title='Group the samples by'>
-<option value='innermost'>innermost span</option><option value='definition'>definition</option><option value='kind'>kind</option><option value='outermost'>outermost span</option></select></div><div id='spanrows'></div></div>
+<option value='innermost'>innermost span</option><option value='definition'>definition</option><option value='0'>outermost (phase)</option><option value='1'>level 2 (unit)</option><option value='2'>level 3 (class)</option></select></div><div id='spanrows'></div></div>
 <script>
 	// Copyright The async-profiler authors
 	// SPDX-License-Identifier: Apache-2.0
@@ -296,15 +296,19 @@
 	}
 
 	// ── Span panel ──────────────────────────────────────────────────────────────
-	// A span tag can be a path of nested regions, outermost first, separated by ' > '
-	// (e.g. 'unit@typer:Foo.scala > def:p.Foo.bar > complete:p.Foo.baz'); each segment is <kind>[@<phase>]:<name>.
+	// The span leaf of a sample is the path of spans enclosing it, outermost first, ' > ' separated
+	// (e.g. 'typer > Foo.scala > Foo > bar > implicit'): group by its innermost or outermost span, by a level, or by
+	// definition (the innermost span that is not a constant marker such as 'implicit' or 'inline').
+	const SPAN_MARKERS = new Set(['implicit', 'inline']);
 	function spanKey(tag, by) {
-		const parts = tag.split(/ > |;/);
-		const seg = by === 'outermost' ? parts[0] : parts[parts.length - 1];
-		const colon = seg.indexOf(':');
-		if (by === 'definition') return colon < 0 ? seg : seg.substring(colon + 1);
-		if (by === 'kind') return colon < 0 ? seg : seg.substring(0, colon).replace(/@.*/, '');
-		return seg;
+		const parts = tag.split(' > ');
+		if (by === 'innermost') return parts[parts.length - 1];
+		if (by === 'definition') {
+			for (let i = parts.length - 1; i >= 0; i--) if (!SPAN_MARKERS.has(parts[i])) return parts[i];
+			return parts[0];
+		}
+		const level = +by;
+		return level < parts.length ? parts[level] : '(none)';
 	}
 
 	// What the panel covers: a frame (hovered, or the zoom root), or the search's matches
