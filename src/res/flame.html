@@ -86,7 +86,7 @@
 	/* Highlight and filter chips */
 	.hl-dot {width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex-shrink: 0}
 	.hl-chip {font-size: 11px; padding: 1px 3px 1px 5px; border: 1px solid; border-radius: 10px; white-space: nowrap; color: var(--fg); display: inline-flex; align-items: center; gap: 3px}
-	.filt-chip {font-size: 11px; padding: 1px 6px; background: var(--hl-bg); border: 1px solid var(--hl-border); border-radius: 10px; white-space: nowrap; color: var(--fg); cursor: default}
+	.filt-chip {font-size: 11px; padding: 1px 6px; background: var(--hl-bg); border: 1px solid var(--hl-border); border-radius: 10px; white-space: nowrap; color: var(--fg); cursor: default; display: inline-flex; align-items: center; gap: 3px}
 	.filt-chip-and {font-size: 10px; opacity: 0.5; font-style: italic; padding: 0 1px}
 	.chip-x {width: 14px; height: 14px; font-size: 11px; padding: 0; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; color: var(--fg); opacity: 0.55; line-height: 1}
 	.chip-x:hover {opacity: 1; background: rgba(128,128,128,0.25); outline: none}
@@ -364,6 +364,11 @@
 	// Keep only the samples taken in matching spans: each frame's width becomes its matching samples, laid out in
 	// the same order (own spans first, as the converter lays out span leaves before a frame's children)
 	function keepOnlySpans(by, key) {
+		addFilter({kind: 'span', label: 'span: ' + key, by, key});
+		openSearch();  // the filter chips are in the search bar
+	}
+
+	function filterSpans(by, key) {
 		const {own, sub, parentOf} = spanMatchCounts(by, key);
 		const next = new Map();  // original frame -> left of its next child in the filtered layout
 		const out = levels.map(() => []);
@@ -385,13 +390,6 @@
 		}
 		for (let h = 0; h < levels.length; h++) levels[h] = out[h];
 		levelsChanged();
-		filterHistory.push('span: ' + key);
-		updateFilterChips();
-		openSearch();  // the filter chips are in the search bar
-		stacksRemoved = true;
-		document.getElementById('restoreBtn').disabled = false;
-		zoomFactor = 1; panSamples = 0;
-		render(levels[0][0]);
 	}
 
 	// A highlight chip for a span group: frames whose samples include it are coloured
@@ -564,8 +562,6 @@
 			levels[h] = newFrames;
 		}
 		levelsChanged();
-		stacksRemoved = true;
-		document.getElementById('restoreBtn').disabled = false;
 	}
 
 	function updateZoomDisplay() {
@@ -592,11 +588,90 @@
 		render(root);
 	}
 
-	function keepOnlyMatched(term) {
-		if (!nav || nav.length === 0) return;
-		if (term) { filterHistory.push(term); updateFilterChips(); }
+	// ── Filters ─────────────────────────────────────────────────────────────────
+	// The filters applied to the frames, in order: a search ({pattern, under: the path of the zoom root, if any}), a
+	// span group ({by, key}) or a removed stack ({path}). Removing one replays the others on the unfiltered frames,
+	// so they refer to frames by their path rather than by position.
+	let filters = [];
+
+	function addFilter(flt) {
+		applyFilter(flt);
+		filters.push(flt);
+		filtersChanged();
+	}
+
+	function applyFilter(flt) {
+		if (flt.kind === 'search') {
+			const under = flt.under ? frameAtPath(flt.under) : levels[0][0];
+			if (under) filterMatches(matchedFrames(flt.pattern, under));
+		} else if (flt.kind === 'span') {
+			filterSpans(flt.by, flt.key);
+		} else {
+			const fr = frameAtPath(flt.path);
+			if (fr) removeStack(fr.left, fr.width);
+		}
+	}
+
+	function removeFilter(i) {
+		filters.splice(i, 1);
+		reapplyFilters();
+	}
+
+	function reapplyFilters() {
+		_swapLevels(reverseMode ? reverseLevelsCache : originalLevels);
+		_reapplySort();
+		for (const flt of filters) applyFilter(flt);
+		filtersChanged();
+	}
+
+	function filtersChanged() {
+		stacksRemoved = filters.length > 0;
+		document.getElementById('restoreBtn').disabled = !stacksRemoved;
+		updateFilterChips();
+		zoomFactor = 1; panSamples = 0;
+		render(levels[0][0]);
+	}
+
+	// The titles from the root to `fr`
+	function framePath(fr) {
+		const path = [fr.title];
+		for (let h = fr.level - 1; h >= 0; h--) path.unshift(findFrame(levels[h], fr.left).title);
+		return path;
+	}
+
+	function frameAtPath(path) {
+		let fr = levels[0][0];
+		if (!fr || fr.title !== path[0]) return null;
+		for (let h = 1; h < path.length; h++) {
+			const frames = levels[h], hi = fr.left + fr.width;
+			let a = 0, b = frames.length;
+			while (a < b) { const m = (a + b) >>> 1; if (frames[m].left < fr.left) a = m + 1; else b = m; }
+			let next = null;
+			for (let i = a; i < frames.length && frames[i].left < hi; i++) if (frames[i].title === path[h]) { next = frames[i]; break; }
+			if (!(fr = next)) return null;
+		}
+		return fr;
+	}
+
+	// The outermost frames matching `pattern` in the range of `under` (as render marks them)
+	function matchedFrames(pattern, under) {
+		const x0 = under.left, x1 = under.left + under.width, marked = [], out = [];
+		for (let h = 0; h < levels.length; h++) {
+			for (const f of levels[h]) {
+				if (f.left < x1 && f.left + f.width > x0 && f.title.match(pattern) && !marked[f.left]) marked[f.left] = f;
+			}
+		}
+		let left = 0;
+		Object.keys(marked).sort((a, b) => a - b).forEach(x => {
+			if (+x >= left) { out.push(marked[x]); left = +x + marked[x].width; }
+		});
+		return out;
+	}
+
+	// Keep only the samples under the frames `matches` (sorted, disjoint)
+	function filterMatches(matches) {
 		let prefix = 0;
-		const kept = nav.map(fr => {
+		const kept = matches.map(fr => {
 			const entry = {left: fr.left, right: fr.left + fr.width, prefix};
 			prefix += fr.width;
 			return entry;
@@ -621,24 +696,11 @@
 			levels[h] = newFrames;
 		}
 		levelsChanged();
-		stacksRemoved = true;
-		document.getElementById('restoreBtn').disabled = false;
-		zoomFactor = 1; panSamples = 0;
-		render(levels[0][0]);
 	}
 
 	function restoreStacks() {
-		for (let h = 0; h < levels.length; h++) {
-			levels[h] = originalLevels[h].map(fr => ({...fr}));
-		}
-		levelsChanged();
-		stacksRemoved = false;
-		filterHistory = [];
-		updateFilterChips();
-		document.getElementById('restoreBtn').disabled = true;
-		zoomFactor = 1; panSamples = 0;
-		_reapplySort();
-		render(levels[0][0]);
+		filters = [];
+		reapplyFilters();
 	}
 
 	function render(newRoot, nav) {
@@ -740,7 +802,6 @@
 
 	let useRegex = false;
 	let caseSensitive = false;
-	let filterHistory = [];
 	const HIGHLIGHT_COLORS = ['#ee00ee','#ff6600','#00bb44','#0099ff','#ffcc00','#ff2244','#00ccbb','#9944ff'];
 	let currentHighlightColor = HIGHLIGHT_COLORS[0];
 	let highlightChips = []; // [{term, pattern, color}]
@@ -748,7 +809,7 @@
 	function updateFilterChips() {
 		const el = document.getElementById('filtchips');
 		el.innerHTML = '';
-		filterHistory.forEach(function(term, i) {
+		filters.forEach(function(flt, i) {
 			if (i > 0) {
 				const sep = document.createElement('span');
 				sep.className = 'filt-chip-and';
@@ -757,11 +818,17 @@
 			}
 			const chip = document.createElement('span');
 			chip.className = 'filt-chip';
-			chip.textContent = term;
-			chip.title = 'Applied filter: ' + term;
+			chip.textContent = flt.label;
+			chip.title = flt.kind === 'remove' ? 'Removed stack: ' + flt.path.join(' \u2192 ') : 'Applied filter: ' + flt.label;
+			const x = document.createElement('button');
+			x.className = 'chip-x';
+			x.textContent = '\u00d7';
+			x.title = 'Remove this filter';
+			x.onclick = function(e) { e.stopPropagation(); removeFilter(i); };
+			chip.appendChild(x);
 			el.appendChild(chip);
 		});
-		document.getElementById('filtrow').classList.toggle('visible', filterHistory.length > 0);
+		document.getElementById('filtrow').classList.toggle('visible', filters.length > 0);
 	}
 
 	function updateHighlightChips() {
@@ -934,7 +1001,11 @@
 				updateSpanPanel(f);
 				canvas.onclick = function() {
 					if ((event.altKey || event.ctrlKey) && h >= root.level && h > 0) {
+						filters.push({kind: 'remove', label: '\u2212 ' + displayName(f.title), path: framePath(f)});
 						removeStack(f.left, f.width);
+						stacksRemoved = true;
+						document.getElementById('restoreBtn').disabled = false;
+						updateFilterChips();
 						root.width > f.width ? render(root) : render();
 					} else if (f !== root) {
 						render(f);
@@ -1134,7 +1205,7 @@
 		const term = document.getElementById('searchinput').value;
 		if (term && nav && nav.length > 0) {
 			addToHistory(term);
-			keepOnlyMatched(term);
+			addFilter({kind: 'search', label: term, pattern, under: root === levels[0][0] ? null : framePath(root)});
 			document.getElementById('searchinput').value = '';
 			search('');
 		}
@@ -1255,7 +1326,7 @@ self.postMessage({progress:1.0,stage:'Done'});self.postMessage({result:newLevels
 		zoomFactor = 1; panSamples = 0;
 		pattern = undefined; nav = []; navIndex = -1; matchval = '';
 		document.getElementById('matchpct').style.display = 'none';
-		filterHistory = []; updateFilterChips();
+		filters = []; updateFilterChips();
 		highlightChips = []; updateHighlightChips();
 		stacksRemoved = false;
 		document.getElementById('restoreBtn').disabled = true;
