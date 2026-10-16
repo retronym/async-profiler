@@ -47,6 +47,9 @@
 	#spanhide {width: 18px; height: 18px; padding: 0; font-size: 13px; line-height: 1; color: var(--fg)}
 	#spanunpin {display: none; width: auto; height: 18px; padding: 0 3px; font-size: 11px; background: var(--hl-bg); outline: 1px solid var(--hl-border); border-radius: 4px}
 	#spanunpin.on {display: inline-block}
+	#spanhistwrap {display: flex; gap: 6px; align-items: center; margin-bottom: 3px}
+	#spanhist {flex: 1; min-width: 0; height: 36px; cursor: pointer}
+	#spanhistlabel {font-size: 10px; opacity: 0.7; white-space: pre; text-align: right}
 	#spanhint {font-size: 10px; opacity: 0.6; margin-top: 4px}
 	#ctxmenu {position: fixed; z-index: 40; display: none; background: var(--legend-bg); color: var(--fg); border: 1px solid var(--legend-border); border-radius: 6px; box-shadow: 0 4px 16px rgba(0,0,0,0.3); padding: 3px; font-size: 12px; min-width: 200px; max-width: 480px}
 	#ctxmenu div {padding: 4px 10px; border-radius: 4px; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap}
@@ -204,7 +207,7 @@
 <div id='selbox'></div>
 <p id='status'></p>
 <div id='ctxmenu'></div>
-<div id='spanpanel'><div id='spanhead'><button id='spanunpin' title='Unpin: follow the hovered frame again'>&#x1F4CC;</button><span id='spantitle'></span><input id='spanfilter' type='text' placeholder='filter' autocomplete='off' spellcheck='false' title='Show only the spans containing this text'><select id='spangroup' title='Group the samples by'></select><button id='spanhide' title='Hide the panel (the Spans button brings it back)'>&#x2013;</button></div><div id='spanrows'></div><div id='spanhint'>Click a span to keep only its samples (a filter; a path also keeps the spans nested in it); Shift+click to highlight it.</div></div>
+<div id='spanpanel'><div id='spanhead'><button id='spanunpin' title='Unpin: follow the hovered frame again'>&#x1F4CC;</button><span id='spantitle'></span><input id='spanfilter' type='text' placeholder='filter' autocomplete='off' spellcheck='false' title='Show only the spans containing this text'><select id='spangroup' title='Group the samples by'></select><button id='spanhide' title='Hide the panel (the Spans button brings it back)'>&#x2013;</button></div><div id='spanhistwrap'><canvas id='spanhist' height='36'></canvas><span id='spanhistlabel'></span></div><div id='spanrows'></div><div id='spanhint'>Click a span to keep only its samples (a filter; a path also keeps the spans nested in it); Shift+click to highlight it.</div></div>
 <script>
 	// Copyright The async-profiler authors
 	// SPDX-License-Identifier: Apache-2.0
@@ -490,8 +493,61 @@
 		document.getElementById('spantitle').textContent = what + ' \u2014 ' + samples(sum) + ' in ' + totals.size + ' spans' +
 			(text ? ', ' + all.length + ' shown' : '');
 		document.getElementById('spantitle').title = target.matches ? pattern.source : target.title;
+		drawSpanHistogram(all, sum, top.length);
 		drawSpanRows(top, sum);
 	}
+
+	// Every group's samples, heaviest first (the rows are the first `shown`), with their cumulative share: how
+	// concentrated the samples are, including the tail the list leaves out
+	let spanHistGroups = [], spanHistLog = false;
+	function drawSpanHistogram(groups, sum, shown) {
+		const cv = document.getElementById('spanhist'), dpr = devicePixelRatio || 1;
+		document.getElementById('spanhistwrap').style.display = '';
+		const w = cv.clientWidth, h = 36;
+		cv.width = w * dpr; cv.height = h * dpr;
+		const g = cv.getContext('2d');
+		g.scale(dpr, dpr);
+		spanHistGroups = groups;
+		// only worth showing for a tail beyond the rows
+		document.getElementById('spanhistwrap').style.display = groups.length > shown ? '' : 'none';
+		if (groups.length <= shown || !w) return;
+		const n = groups.length, max = groups[0][1], fg = getComputedStyle(document.documentElement).getPropertyValue('--fg');
+		// a long tail on a log scale, so that the heavy groups stay visible
+		spanHistLog = n > w / 4;
+		const pos = i => spanHistLog ? w * Math.log1p(i) / Math.log1p(n) : w * i / n;
+		let cum = 0, shownSum = 0;
+		g.fillStyle = '#e17d00';
+		for (let i = 0; i < n; i++) {
+			const v = groups[i][1], bh = Math.max(1, (h - 2) * v / max), x0 = pos(i), bw = pos(i + 1) - x0;
+			g.globalAlpha = i < shown ? 0.75 : 0.35;
+			g.fillRect(x0, h - bh, Math.max(bw - (bw > 3 ? 1 : 0), 0.5), bh);
+			if (i < shown) shownSum += v;
+		}
+		g.globalAlpha = 1;
+		g.strokeStyle = fg;
+		g.lineWidth = 1;
+		g.beginPath();
+		g.moveTo(0, h);
+		for (let i = 0; i < groups.length; i++) {
+			cum += groups[i][1];
+			g.lineTo(pos(i + 1), h - (h - 2) * cum / (sum || 1));
+		}
+		g.stroke();
+		document.getElementById('spanhistlabel').textContent = groups.length + ' groups\nlisted: ' + (100 * shownSum / (sum || 1)).toFixed(0) + '%';
+	}
+	function spanHistAt(e) {
+		const cv = document.getElementById('spanhist');
+		const n = spanHistGroups.length, f = e.offsetX / cv.clientWidth;
+		return spanHistGroups[Math.floor(spanHistLog ? Math.expm1(f * Math.log1p(n)) : f * n)];
+	}
+	document.getElementById('spanhist').onmousemove = function(e) {
+		const grp = spanHistAt(e);
+		this.title = grp ? grp[0] + '\n' + samples(grp[1]) + (spanHistLog ? '\n(groups on a log scale)' : '') + '\nClick: keep only these samples. Shift+click: highlight' : '';
+	};
+	document.getElementById('spanhist').onclick = function(e) {
+		const grp = spanHistAt(e), by = document.getElementById('spangroup').value;
+		if (grp) e.shiftKey ? addSpanHighlight(by, grp[0]) : keepOnlySpans(by, grp[0]);
+	};
 
 	// A long span shortened for the list: a {...} list to its first item, anything else to its ends
 	function shortSpan(s) {
