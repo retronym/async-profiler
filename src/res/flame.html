@@ -41,6 +41,12 @@
 	.spanbar {position: absolute; left: 0; top: 0; bottom: 0; background: #e17d00; opacity: 0.35; z-index: -1}
 	.spanname {z-index: 0}
 	.spannum {text-align: right; font-family: monospace}
+	.spanrow .spanname {cursor: pointer}
+	.spanrow:hover .spanname {outline: 1px solid var(--hl-border)}
+	#spanhide {width: 18px; height: 18px; padding: 0; font-size: 13px; line-height: 1; color: var(--fg)}
+	#spanhint {font-size: 10px; opacity: 0.6; margin-top: 4px}
+	#spanbtn {width: auto; padding: 0 5px; font-size: 11px; color: var(--fg); display: none}
+	#spanbtn.active {background-color: var(--hl-bg); outline: 1px solid var(--hl-border); border-radius: 4px}
 	#toolbar::after {content: ''; display: table; clear: both}
 	#canvas {width: 100%; height: /*height:*/300px; display: block}
 	#selbox {position: absolute; display: none; background: rgba(100,150,255,0.15); border: 1px solid rgba(100,150,255,0.7); pointer-events: none; box-sizing: border-box}
@@ -113,6 +119,7 @@
 <span id='zoomlevel' title='Current zoom level'>100%</span>
 <button id='zoomreset' title='Reset zoom' disabled>1:1</button>
 <span class='btn-sep'></span>
+<button id='spanbtn' title='Span panel: the spans of the samples under the hovered frame'>Spans</button>
 <button id='restoreBtn' title='Restore removed stacks' disabled><svg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 20 20'><path d='M3.5 10A6.5 6.5 0 0 0 10 16.5 6.5 6.5 0 0 0 16.5 10 6.5 6.5 0 0 0 12 4' stroke='#e17d00' fill='none' stroke-width='2' stroke-linecap='round'/><polyline points='12,1 12,5 8,4' fill='none' stroke='#e17d00' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/></svg></button>
 </header>
 <header style='float: right'>Produced by <a href='https://github.com/async-profiler/async-profiler'>async-profiler</a></header>
@@ -191,7 +198,7 @@
 <div id='selbox'></div>
 <p id='status'></p>
 <div id='spanpanel'><div id='spanhead'><span id='spantitle'></span><select id='spangroup' title='Group the samples by'>
-<option value='chain'>definition, with owners</option><option value='definition'>definition</option><option value='innermost'>innermost span</option><option value='0'>outermost (phase)</option><option value='1'>level 2 (unit)</option><option value='2'>level 3 (class)</option></select></div><div id='spanrows'></div></div>
+<option value='chain'>definition, with owners</option><option value='definition'>definition</option><option value='innermost'>innermost span</option><option value='0'>outermost (phase)</option><option value='1'>level 2 (unit)</option><option value='2'>level 3 (class)</option></select><button id='spanhide' title='Hide the panel (the Spans button brings it back)'>&#x2013;</button></div><div id='spanrows'></div><div id='spanhint'>Click a span to keep only its samples (a filter, with nested spans for &ldquo;definition, with owners&rdquo;); Shift+click to highlight it.</div></div>
 <script>
 	// Copyright The async-profiler authors
 	// SPDX-License-Identifier: Apache-2.0
@@ -316,6 +323,107 @@
 		return level < parts.length ? parts[level] : '(none)';
 	}
 
+	// Whether a span path belongs to the group `key` under grouping `by`; with owners, nested spans belong too
+	function spanMatches(tag, by, key) {
+		const k = spanKey(tag, by);
+		if (k === key) return true;
+		if (by !== 'chain') return false;
+		const chain = tag.split(' > ').slice(2).filter(p => !SPAN_MARKERS.has(p)).join(' > ');
+		return chain.startsWith(key + ' > ');
+	}
+
+	// Per frame: the samples of its own spans that match, and of its subtree (frames are matched to parents by
+	// position, level by level)
+	function spanMatchCounts(by, key) {
+		const own = new Map(), sub = new Map(), parentOf = new Map();
+		for (let h = 0; h < levels.length; h++) {
+			for (const fr of levels[h]) {
+				let n = 0;
+				const sp = fr.spans;
+				if (sp) for (let j = 0; j < sp.length; j += 2) if (spanMatches(cpool[sp[j]], by, key)) n += sp[j + 1];
+				own.set(fr, n);
+				sub.set(fr, n);
+				if (h > 0) { const p = findFrame(levels[h - 1], fr.left); if (p) parentOf.set(fr, p); }
+			}
+		}
+		for (let h = levels.length - 1; h > 0; h--) {
+			for (const fr of levels[h]) {
+				const p = parentOf.get(fr), n = sub.get(fr);
+				if (p && n) sub.set(p, sub.get(p) + n);
+			}
+		}
+		return {own, sub, parentOf};
+	}
+
+	// Keep only the samples taken in matching spans: each frame's width becomes its matching samples, laid out in
+	// the same order (own spans first, as the converter lays out a frame's own samples before its children)
+	function keepOnlySpans(by, key) {
+		const {own, sub, parentOf} = spanMatchCounts(by, key);
+		const next = new Map();  // frame -> left of its next child
+		const out = levels.map(() => []);
+		for (let h = 0; h < levels.length; h++) {
+			for (const fr of levels[h]) {
+				const w = sub.get(fr);
+				if (!w) continue;
+				const p = parentOf.get(fr);
+				let left = 0;
+				if (h > 0) {
+					if (!p || !next.has(p)) continue;
+					left = next.get(p);
+					next.set(p, left + w);
+				}
+				const sp = fr.spans, spans = [];
+				if (sp) for (let j = 0; j < sp.length; j += 2) if (spanMatches(cpool[sp[j]], by, key)) spans.push(sp[j], sp[j + 1]);
+				const copy = {...fr, left, width: w, spans: spans.length ? spans : undefined};
+				next.set(copy, left + own.get(fr));
+				next.set(fr, left + own.get(fr));  // children find their parent by the original frame
+				out[h].push(copy);
+			}
+		}
+		for (let h = 0; h < levels.length; h++) levels[h] = out[h];
+		filterHistory.push('span: ' + key);
+		updateFilterChips();
+		openSearch();  // the filter chips are in the search bar
+		stacksRemoved = true;
+		document.getElementById('restoreBtn').disabled = false;
+		zoomFactor = 1; panSamples = 0;
+		render(levels[0][0]);
+	}
+
+	// A highlight chip for a span group: frames whose samples include it are coloured
+	function addSpanHighlight(by, key) {
+		const term = 'span: ' + key;
+		if (highlightChips.some(c => c.term === term)) return;
+		const chip = {term, pattern: /(?!)/, color: currentHighlightColor, span: {by, key}, frames: null, root: null};
+		highlightChips.push(chip);
+		openSearch();  // the highlight chips are in the search bar
+		const used = new Set(highlightChips.map(c => c.color));
+		currentHighlightColor = HIGHLIGHT_COLORS.find(c => !used.has(c)) || HIGHLIGHT_COLORS[0];
+		updateHighlightChips();
+		render(root);
+	}
+
+	// The frames a span highlight colours, recomputed when the frames have been rebuilt (filter, restore, bottom-up)
+	function spanChipHas(chip, f) {
+		if (chip.root !== levels[0][0]) {
+			const {sub} = spanMatchCounts(chip.span.by, chip.span.key);
+			chip.frames = new Set();
+			for (const [fr, n] of sub) if (n > 0) chip.frames.add(fr);
+			chip.root = levels[0][0];
+		}
+		return chip.frames.has(f);
+	}
+
+	function setSpanPanelOpen(open) {
+		document.getElementById('spanpanel').classList.toggle('open', open);
+		document.getElementById('spanbtn').classList.toggle('active', open);
+		try { localStorage.setItem('flame-spanpanel', open ? 'open' : 'closed'); } catch (ignored) {}
+	}
+	let spanPanelOpen = true;
+	try { spanPanelOpen = localStorage.getItem('flame-spanpanel') !== 'closed'; } catch (ignored) {}
+	document.getElementById('spanhide').onclick = () => { spanPanelOpen = false; setSpanPanelOpen(false); };
+	document.getElementById('spanbtn').onclick = () => { spanPanelOpen = !spanPanelOpen; setSpanPanelOpen(spanPanelOpen); if (spanPanelOpen) drawSpanPanel(spanPanelTarget || root); };
+
 	// What the panel covers: a frame (hovered, or the zoom root), or the search's matches
 	let spanPanelTarget = null, spanPanelPending = false;
 	function updateSpanPanel(fr) {
@@ -383,9 +491,15 @@
 			p.className = 'spannum';
 			p.textContent = (100 * v / (sum || 1)).toFixed(1) + '%';
 			row.append(name, n, p);
+			row.title = 'Click: keep only these samples. Shift+click: highlight';
+			row.onclick = ((key) => (e) => {
+				const by = document.getElementById('spangroup').value;
+				if (e.shiftKey) addSpanHighlight(by, key); else keepOnlySpans(by, key);
+			})(k);
 			rows.appendChild(row);
 		}
-		document.getElementById('spanpanel').classList.add('open');
+		document.getElementById('spanbtn').style.display = 'inline-block';
+		setSpanPanelOpen(spanPanelOpen);
 	}
 
 	document.getElementById('spangroup').onchange = () => drawSpanPanel(spanPanelTarget || root);
@@ -560,7 +674,8 @@
 					hlColor = currentHighlightColor;
 				} else {
 					for (let ci = 0; ci < highlightChips.length; ci++) {
-						if (f.title.match(highlightChips[ci].pattern)) { hlColor = highlightChips[ci].color; break; }
+						const hc = highlightChips[ci];
+						if (hc.span ? spanChipHas(hc, f) : f.title.match(hc.pattern)) { hlColor = hc.color; break; }
 					}
 				}
 				const dim = (pattern || highlightChips.length > 0) && !hlColor;
