@@ -1103,10 +1103,10 @@ const root=levels[0][0],leaves=[];
 for(let h=1;h<levels.length;h++)for(const fr of levels[h])if(!hasChildren.has(fr))leaves.push(fr);
 self.postMessage({progress:0.32,stage:'Building reverse tree\u2026'});
 const trieRoot={title:root.title,width:root.width,color:root.color,details:root.details||'',children:new Map()};
-for(let i=0;i<leaves.length;i++){const leaf=leaves[i],stack=[];let fr=leaf;while(fr&&fr!==root){stack.push(fr);fr=parentOf.get(fr);}let node=trieRoot;for(const frame of stack){let child=node.children.get(frame.title);if(!child){child={title:frame.title,width:0,color:frame.color,details:frame.details||'',children:new Map()};node.children.set(frame.title,child);}child.width+=leaf.width;node=child;}if(i%100===0)self.postMessage({progress:0.32+0.38*i/leaves.length,stage:'Building reverse tree\u2026'});}
+for(let i=0;i<leaves.length;i++){const leaf=leaves[i],stack=[];let fr=leaf;while(fr&&fr!==root){stack.push(fr);fr=parentOf.get(fr);}let node=trieRoot;for(const frame of stack){let child=node.children.get(frame.title);if(!child){child={title:frame.title,width:0,color:frame.color,details:frame.details||'',children:new Map()};node.children.set(frame.title,child);}child.width+=leaf.width;node=child;}if(leaf.spans){const sp=node.spans||(node.spans=[]);for(let j=0;j<leaf.spans.length;j++)sp.push(leaf.spans[j]);}if(i%100===0)self.postMessage({progress:0.32+0.38*i/leaves.length,stage:'Building reverse tree\u2026'});}
 self.postMessage({progress:0.72,stage:'Computing layout\u2026'});
 const newLevels=[];let pos=0;
-function layout(node,depth){if(!newLevels[depth])newLevels[depth]=[];const start=pos;if(node.children.size===0){pos+=node.width;}else{const kids=Array.from(node.children.values()).sort(function(a,b){return b.width-a.width;});for(const k of kids)layout(k,depth+1);}newLevels[depth].push({level:depth,left:start,width:pos-start,color:node.color,title:node.title,details:node.details});}
+function layout(node,depth){if(!newLevels[depth])newLevels[depth]=[];const start=pos;if(node.children.size===0){pos+=node.width;}else{const kids=Array.from(node.children.values()).sort(function(a,b){return b.width-a.width;});for(const k of kids)layout(k,depth+1);}const out={level:depth,left:start,width:pos-start,color:node.color,title:node.title,details:node.details};if(node.spans)out.spans=node.spans;newLevels[depth].push(out);}
 layout(trieRoot,0);
 for(const lv of newLevels)lv.sort(function(a,b){return a.left-b.left;});
 self.postMessage({progress:1.0,stage:'Done'});self.postMessage({result:newLevels});};`;
