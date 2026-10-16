@@ -212,6 +212,9 @@ public class FlameGraph implements Comparator<Frame> {
 
     public void dump(PrintStream out) {
         mintotal = (long) (root.total * args.minwidth / 100);
+        if (args.spans && mintotal > 1) {
+            rollUpSpans(root);
+        }
 
         if ("collapsed".equals(args.output)) {
             printFrameCollapsed(out, root, cpool.keys());
@@ -322,10 +325,39 @@ public class FlameGraph implements Comparator<Frame> {
 
         x += frame.self;
         for (Frame child : children) {
-            if (child.total >= mintotal) {
+            if (child.total >= mintotal || child.getType() == TYPE_SPAN) {
                 printFrame(out, child, level + 1, x);
             }
             x += child.total;
+        }
+    }
+
+    // With --spans and --minwidth: a subtree too thin to show is replaced by the span leaves it held, summed by tag,
+    // as span leaves of the frame above it, so the samples under each frame shown keep their spans
+    private void rollUpSpans(Frame frame) {
+        Frame[] children = frame.values().toArray(EMPTY_FRAME_ARRAY);
+        for (Frame child : children) {
+            if (child.getType() == TYPE_SPAN) continue;
+            if (child.total >= mintotal) {
+                rollUpSpans(child);
+            } else {
+                frame.remove(child.key);
+                frame.self += child.total;
+                addSpansOf(child, frame);
+            }
+        }
+    }
+
+    private void addSpansOf(Frame from, Frame to) {
+        for (Frame child : from.values()) {
+            if (child.getType() == TYPE_SPAN) {
+                Frame span = to.getChild(child.getTitleIndex(), TYPE_SPAN);
+                span.total += child.total;
+                span.self += child.total;
+                to.self -= child.total;
+            } else {
+                addSpansOf(child, to);
+            }
         }
     }
 
