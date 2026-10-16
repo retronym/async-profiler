@@ -393,7 +393,7 @@
 	// Keep only the samples taken in matching spans: each frame's width becomes its matching samples, laid out in
 	// the same order (own spans first, as the converter lays out span leaves before a frame's children)
 	function keepOnlySpans(by, key) {
-		addFilter({kind: 'span', label: 'span: ' + key, by, key});
+		addFilter({kind: 'span', label: 'span: ' + shortSpanPath(key), title: 'span: ' + key, by, key});
 		openSearch();  // the filter chips are in the search bar
 	}
 
@@ -423,7 +423,7 @@
 
 	// A highlight chip for a span group: frames whose samples include it are coloured
 	function addSpanHighlight(by, key) {
-		addHighlight('span: ' + key, /(?!)/, {by, key});
+		addHighlight('span: ' + key, /(?!)/, {by, key}, 'span: ' + shortSpanPath(key));
 	}
 
 	// Bumped whenever the frames change (filters, removed stacks, restore, bottom-up, sort), for what is computed from them
@@ -555,6 +555,9 @@
 		if (brace > 0 && s.endsWith('}') && s.indexOf(',', brace) > 0) s = s.substring(0, s.indexOf(',', brace)) + '\u2026}';
 		return s.length <= 48 ? s : s.substring(0, 30) + '\u2026' + s.substring(s.length - 17);
 	}
+	function shortSpanPath(path) {
+		return path.split(' > ').map(shortSpan).join(' > ');
+	}
 
 	// Adds the span samples under `fr` to `totals`, keyed by spanKey; returns their sum
 	function addSpans(fr, by, totals) {
@@ -607,7 +610,7 @@
 			bar.className = 'spanbar';
 			bar.style.width = (100 * v / max) + '%';
 			name.appendChild(bar);
-			name.appendChild(document.createTextNode(k.split(' > ').map(shortSpan).join(' > ')));
+			name.appendChild(document.createTextNode(shortSpanPath(k)));
 			row.append(name, cell(v.toLocaleString()), cell(share(v, sum)), cell(share(v, root.width)), cell(share(v, all)));
 			row.title = k + '\n' + samples(v) + ': ' + share(v, sum) + ' of these, ' + share(v, root.width) + ' of the root, ' +
 				share(v, all) + ' of the profile\nClick: keep only these samples. Shift+click: highlight';
@@ -946,7 +949,7 @@
 			const chip = document.createElement('span');
 			chip.className = 'filt-chip';
 			chip.textContent = flt.label;
-			chip.title = flt.kind === 'remove' ? 'Removed stack: ' + flt.path.join(' \u2192 ') : 'Applied filter: ' + flt.label;
+			chip.title = flt.kind === 'remove' ? 'Removed stack: ' + flt.path.join(' \u2192 ') : 'Applied filter: ' + (flt.title || flt.label);
 			const x = document.createElement('button');
 			x.className = 'chip-x';
 			x.textContent = '\u00d7';
@@ -969,7 +972,8 @@
 			dot.className = 'hl-dot';
 			dot.style.background = chip.color;
 			const label = document.createElement('span');
-			label.textContent = chip.term;
+			label.textContent = chip.label || chip.term;
+			span.title = chip.term;
 			const x = document.createElement('button');
 			x.className = 'chip-x';
 			x.textContent = '\u00d7';
@@ -1000,9 +1004,9 @@
 	}
 
 	// A highlight chip for frames matching `pat`, or for those with samples in a span group (`span`: {by, key})
-	function addHighlight(term, pat, span) {
+	function addHighlight(term, pat, span, label) {
 		if (highlightChips.some(c => c.term === term)) return;
-		highlightChips.push({term, pattern: pat, color: currentHighlightColor, span, frames: null, gen: -1});
+		highlightChips.push({term, label, pattern: pat, color: currentHighlightColor, span, frames: null, gen: -1});
 		const used = new Set(highlightChips.map(c => c.color));
 		currentHighlightColor = HIGHLIGHT_COLORS.find(c => !used.has(c)) || HIGHLIGHT_COLORS[0];
 		updateHighlightChips();
