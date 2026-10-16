@@ -30,6 +30,17 @@
 	#hl span {padding: 0 3px 0 3px}
 	#status {left: 0}
 	#toolbar {position: sticky; top: 0; z-index: 10; background: var(--bg)}
+	/* Span panel (--spans): where the samples under the hovered frame were taken, by span tag */
+	#spanpanel {position: fixed; right: 12px; bottom: 28px; z-index: 20; width: 460px; max-height: 60vh; overflow: auto; display: none; background: var(--legend-bg); border: 1px solid var(--legend-border); border-radius: 4px; padding: 6px 8px; font-size: 11px; box-shadow: 0 2px 8px rgba(0,0,0,0.2)}
+	#spanpanel.open {display: block}
+	#spanhead {display: flex; gap: 6px; align-items: baseline; margin-bottom: 4px}
+	#spantitle {flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: bold}
+	#spangroup {font: 11px Verdana, sans-serif}
+	.spanrow {display: grid; grid-template-columns: 1fr 52px 40px; gap: 4px; align-items: center; padding: 1px 0}
+	.spanname {position: relative; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 1px 3px}
+	.spanbar {position: absolute; left: 0; top: 0; bottom: 0; background: #e17d00; opacity: 0.35; z-index: -1}
+	.spanname {z-index: 0}
+	.spannum {text-align: right; font-family: monospace}
 	#toolbar::after {content: ''; display: table; clear: both}
 	#canvas {width: 100%; height: /*height:*/300px; display: block}
 	#selbox {position: absolute; display: none; background: rgba(100,150,255,0.15); border: 1px solid rgba(100,150,255,0.7); pointer-events: none; box-sizing: border-box}
@@ -179,6 +190,8 @@
 <div id='hl'><span></span></div>
 <div id='selbox'></div>
 <p id='status'></p>
+<div id='spanpanel'><div id='spanhead'><span id='spantitle'></span><select id='spangroup' title='Group the samples by'>
+<option value='innermost'>innermost span</option><option value='definition'>definition</option><option value='kind'>kind</option><option value='outermost'>outermost span</option></select></div><div id='spanrows'></div></div>
 <script>
 	// Copyright The async-profiler authors
 	// SPDX-License-Identifier: Apache-2.0
@@ -256,7 +269,17 @@
 		return diff > 0 ? 'rgb(255,' + v + ',' + v + ')' : 'rgb(' + v + ',' + v + ',255)';
 	}
 
+	// Span tags (type 7, from --spans) are leaves after the stack: kept on their parent frame for the span panel,
+	// not drawn
+	let hasSpans = false;
 	function f(key, level, left, width, inln, c1, int) {
+		if ((key & 7) === 7) {
+			level0 = level; left0 += left; width0 = width || width0;
+			const parent = levels[level - 1][levels[level - 1].length - 1];
+			if (parent) (parent.spans || (parent.spans = [])).push(key >>> 3, width0);
+			hasSpans = true;
+			return;
+		}
 		levels[level0 = level].push({level, left: left0 += left, width: width0 = width || width0,
 			color: maxdiff >= 0 ? getDiffColor(d) : getColor(palette[key & 7]),
 			title: cpool[key >>> 3],
@@ -271,6 +294,78 @@
 	function n(key, width, inln, c1, int) {
 		f(key, level0, width0, width, inln, c1, int)
 	}
+
+	// ── Span panel ──────────────────────────────────────────────────────────────
+	// A span tag can be a path of nested regions, outermost first, separated by ' > '
+	// (e.g. 'unit@typer:Foo.scala > def:p.Foo.bar > complete:p.Foo.baz'); each segment is <kind>[@<phase>]:<name>.
+	function spanKey(tag, by) {
+		const parts = tag.split(/ > |;/);
+		const seg = by === 'outermost' ? parts[0] : parts[parts.length - 1];
+		const colon = seg.indexOf(':');
+		if (by === 'definition') return colon < 0 ? seg : seg.substring(colon + 1);
+		if (by === 'kind') return colon < 0 ? seg : seg.substring(0, colon).replace(/@.*/, '');
+		return seg;
+	}
+
+	let spanPanelFrame = null, spanPanelPending = false;
+	function updateSpanPanel(fr) {
+		if (!hasSpans || !fr) return;
+		spanPanelFrame = fr;
+		if (spanPanelPending) return;
+		spanPanelPending = true;
+		requestAnimationFrame(() => { spanPanelPending = false; drawSpanPanel(spanPanelFrame); });
+	}
+
+	function drawSpanPanel(fr) {
+		const by = document.getElementById('spangroup').value;
+		const totals = new Map();
+		let sum = 0;
+		const lo = fr.left, hi = fr.left + fr.width;
+		for (let h = fr.level; h < levels.length; h++) {
+			const frames = levels[h];
+			// first frame at this level ending after lo
+			let a = 0, b = frames.length;
+			while (a < b) { const m = (a + b) >>> 1; if (frames[m].left + frames[m].width <= lo) a = m + 1; else b = m; }
+			for (let i = a; i < frames.length && frames[i].left < hi; i++) {
+				const sp = frames[i].spans;
+				if (!sp) continue;
+				for (let j = 0; j < sp.length; j += 2) {
+					const k = spanKey(cpool[sp[j]], by);
+					totals.set(k, (totals.get(k) || 0) + sp[j + 1]);
+					sum += sp[j + 1];
+				}
+			}
+		}
+		const top = [...totals.entries()].sort((x, y) => y[1] - x[1]).slice(0, 25);
+		const max = top.length ? top[0][1] : 1;
+		document.getElementById('spantitle').textContent = displayName(fr.title) + ' — ' + samples(sum) + ' in ' + totals.size + ' spans';
+		document.getElementById('spantitle').title = fr.title;
+		const rows = document.getElementById('spanrows');
+		rows.textContent = '';
+		for (const [k, v] of top) {
+			const row = document.createElement('div');
+			row.className = 'spanrow';
+			const name = document.createElement('span');
+			name.className = 'spanname';
+			name.title = k;
+			const bar = document.createElement('span');
+			bar.className = 'spanbar';
+			bar.style.width = (100 * v / max) + '%';
+			name.appendChild(bar);
+			name.appendChild(document.createTextNode(k));
+			const n = document.createElement('span');
+			n.className = 'spannum';
+			n.textContent = v.toLocaleString();
+			const p = document.createElement('span');
+			p.className = 'spannum';
+			p.textContent = (100 * v / (sum || 1)).toFixed(1) + '%';
+			row.append(name, n, p);
+			rows.appendChild(row);
+		}
+		document.getElementById('spanpanel').classList.add('open');
+	}
+
+	document.getElementById('spangroup').onchange = () => drawSpanPanel(spanPanelFrame || root);
 
 	function samples(n) {
 		return n === 1 ? '1 sample' : n.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',') + ' samples';
@@ -401,6 +496,7 @@
 
 		const prevRoot = root;
 		root = newRoot || levels[0][0];
+		updateSpanPanel(root);
 		if (root !== prevRoot) {
 			zoomFactor = 1;
 			panSamples = 0;
@@ -678,6 +774,7 @@
 				const canRemove = (event.altKey || event.ctrlKey) && h >= root.level && h > 0;
 				canvas.style.cursor = canRemove ? 'no-drop' : 'pointer';
 				currentFrame = f;
+				updateSpanPanel(f);
 				canvas.onclick = function() {
 					if ((event.altKey || event.ctrlKey) && h >= root.level && h > 0) {
 						removeStack(f.left, f.width);
@@ -696,6 +793,7 @@
 	}
 
 	canvas.onmouseout = function() {
+		if (root) updateSpanPanel(root);
 		hl.style.display = 'none';
 		status.style.display = 'none';
 		canvas.title = '';

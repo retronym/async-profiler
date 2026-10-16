@@ -49,14 +49,6 @@ public class JfrToFlame extends JfrConverter {
                     if (args.threads) {
                         stack.push(getThreadName(event.tid), TYPE_NATIVE);
                     }
-                    if (spanTag != null) {
-                        // a tag can name a path of nested regions, outermost first, separated by ';'
-                        for (int from = 0, to; from <= spanTag.length(); from = to + 1) {
-                            to = spanTag.indexOf(';', from);
-                            if (to < 0) to = spanTag.length();
-                            stack.push(spanTag.substring(from, to), TYPE_KERNEL);
-                        }
-                    }
                     if (args.classify) {
                         Classifier.Category category = getCategory(stackTrace);
                         stack.push(category.title, category.type);
@@ -75,6 +67,9 @@ public class JfrToFlame extends JfrConverter {
                     if (classId != 0) {
                         stack.push(getClassName(classId), (event instanceof AllocationSample)
                                 && ((AllocationSample) event).tlabSize == 0 ? TYPE_KERNEL : TYPE_INLINED);
+                    }
+                    if (spanTag != null) {
+                        stack.push(spanTag, TYPE_SPAN);
                     }
 
                     fg.addSample(stack, value);

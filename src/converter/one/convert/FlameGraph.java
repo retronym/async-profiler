@@ -17,7 +17,7 @@ import static one.convert.ResourceProcessor.*;
 
 public class FlameGraph implements Comparator<Frame> {
     private static final Frame[] EMPTY_FRAME_ARRAY = {};
-    private static final String[] FRAME_SUFFIX = {"_[0]", "_[j]", "_[i]", "", "", "_[k]", "_[1]"};
+    private static final String[] FRAME_SUFFIX = {"_[0]", "_[j]", "_[i]", "", "", "_[k]", "_[1]", "_[s]"};
     private static final byte HAS_SUFFIX = (byte) 0x80;
     private static final int FLUSH_THRESHOLD = 15000;
     private static final long NEW_FRAME_DIFF = Long.MIN_VALUE;
@@ -118,7 +118,7 @@ public class FlameGraph implements Comparator<Frame> {
 
                 int titleIndex = nameAndType >>> 3;
                 byte type = (byte) (nameAndType & 7);
-                byte normalizedType = type <= TYPE_INLINED || type >= TYPE_C1_COMPILED ? TYPE_JIT_COMPILED : type;
+                byte normalizedType = type <= TYPE_INLINED || type == TYPE_C1_COMPILED ? TYPE_JIT_COMPILED : type;
 
                 Frame f = level > 0 || needRebuild ? new Frame(titleIndex, normalizedType) : root;
                 fillFrameCounters(f, type, total);
@@ -433,6 +433,8 @@ public class FlameGraph implements Comparator<Frame> {
             return TYPE_INTERPRETED | HAS_SUFFIX;
         } else if (title.endsWith("_[1]")) {
             return TYPE_C1_COMPILED | HAS_SUFFIX;
+        } else if (title.endsWith("_[s]")) {
+            return TYPE_SPAN | HAS_SUFFIX;
         } else if (title.contains("::") || title.startsWith("-[") || title.startsWith("+[")) {
             return TYPE_CPP;
         } else if (title.indexOf('/') > 0 && title.charAt(0) != '['

@@ -15,6 +15,8 @@ public class Frame extends HashMap<Integer, Frame> {
     public static final byte TYPE_CPP = 4;
     public static final byte TYPE_KERNEL = 5;
     public static final byte TYPE_C1_COMPILED = 6;
+    // The tag of the span a sample was taken in (--spans): a leaf after the stack, for the viewer's span panel
+    public static final byte TYPE_SPAN = 7;
 
     static final int TYPE_SHIFT = 28;
     static final int TITLE_MASK = (1 << TYPE_SHIFT) - 1;
