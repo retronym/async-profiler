@@ -10,6 +10,11 @@ import one.jfr.StackTrace;
 import one.jfr.event.AllocationSample;
 import one.jfr.event.Event;
 
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.io.PrintStream;
@@ -27,6 +32,43 @@ public class JfrToFlame extends JfrConverter {
         this.fg = new FlameGraph(args);
     }
 
+    // With --spans: the samples of the current chunk with their times, resolved to frames after aggregation
+    private Timeline timeline;
+    private final List<Spans.TaggedEvent> chunkEvents = new ArrayList<>();
+    private long[] chunkTimes = new long[1024];
+
+    @Override
+    protected void onSample(Spans.TaggedEvent event, long timeNanos) {
+        if (timeline == null) {
+            timeline = new Timeline();
+            fg.setTimeline(timeline, spans());
+        }
+        if (chunkEvents.size() == chunkTimes.length) chunkTimes = Arrays.copyOf(chunkTimes, chunkTimes.length * 2);
+        chunkTimes[chunkEvents.size()] = timeNanos;
+        chunkEvents.add(event);
+    }
+
+    // Samples are aggregated before they reach the flame graph: the aggregator's grouping, to find the frame of each
+    private final class GroupKey {
+        final Event event;
+
+        GroupKey(Event event) {
+            this.event = event;
+        }
+
+        @Override
+        public int hashCode() {
+            return event.hashCode() + (args.threads ? event.tid * 31 : 0);
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (!(o instanceof GroupKey)) return false;
+            Event e = ((GroupKey) o).event;
+            return e.stackTraceId == event.stackTraceId && (!args.threads || e.tid == event.tid) && e.sameGroup(event);
+        }
+    }
+
     @Override
     protected boolean supportsSpans() {
         // the span path is a leaf of each stack; reversed, it would be the root (the viewer has its own bottom-up view)
@@ -35,11 +77,13 @@ public class JfrToFlame extends JfrConverter {
 
     @Override
     protected void convertChunk() {
+        Map<GroupKey, Frame> leaves = timeline != null ? new HashMap<>() : null;
         collector.forEach(new AggregatedEventVisitor() {
             final CallStack stack = new CallStack();
 
             @Override
             public void visit(Event event, long value) {
+                Event key = event;
                 String spanTag = null;
                 if (event instanceof Spans.TaggedEvent) {
                     spanTag = ((Spans.TaggedEvent) event).tag;
@@ -78,11 +122,20 @@ public class JfrToFlame extends JfrConverter {
                         stack.push(spanTag, TYPE_SPAN);
                     }
 
-                    fg.addSample(stack, value);
+                    Frame leaf = fg.addSample(stack, value);
+                    if (leaves != null && leaf != null) leaves.put(new GroupKey(key), leaf);
                     stack.clear();
                 }
             }
         });
+        if (leaves != null) {
+            for (int i = 0; i < chunkEvents.size(); i++) {
+                Spans.TaggedEvent event = chunkEvents.get(i);
+                Frame leaf = leaves.get(new GroupKey(event));
+                if (leaf != null) timeline.add(event.tid, getThreadName(event.tid), chunkTimes[i], leaf);
+            }
+        }
+        chunkEvents.clear();
     }
 
     public void dump(OutputStream out) throws IOException {
