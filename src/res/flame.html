@@ -35,13 +35,11 @@
 	#spanpanel.open {display: block}
 	#spanhead {display: flex; gap: 6px; align-items: baseline; margin-bottom: 4px}
 	#spantitle {flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: bold}
-	#spangroup {font: 11px Verdana, sans-serif}
+	#spangroup {font: 11px Verdana, sans-serif; background: var(--bg); color: var(--fg); border: 1px solid var(--legend-border)}
 	.spanrow {display: grid; grid-template-columns: 1fr 52px 40px; gap: 4px; align-items: center; padding: 1px 0}
-	.spanname {position: relative; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 1px 3px}
+	.spanname {position: relative; z-index: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 1px 3px; cursor: pointer}
 	.spanbar {position: absolute; left: 0; top: 0; bottom: 0; background: #e17d00; opacity: 0.35; z-index: -1}
-	.spanname {z-index: 0}
 	.spannum {text-align: right; font-family: monospace}
-	.spanrow .spanname {cursor: pointer}
 	.spanrow:hover .spanname {outline: 1px solid var(--hl-border)}
 	#spanhide {width: 18px; height: 18px; padding: 0; font-size: 13px; line-height: 1; color: var(--fg)}
 	#spanhint {font-size: 10px; opacity: 0.6; margin-top: 4px}
@@ -307,6 +305,12 @@
 	// (e.g. 'typer > Foo.scala > Foo > bar > implicit'): group by its innermost or outermost span, by a level, or by
 	// definition (the innermost span that is not a constant marker such as 'implicit' or 'inline').
 	const SPAN_MARKERS = new Set(['implicit', 'inline']);
+	const spanKeys = {};  // grouping -> cpool index -> key
+	function spanKeyOf(idx, by) {
+		const keys = spanKeys[by] || (spanKeys[by] = []);
+		const k = keys[idx];
+		return k !== undefined ? k : (keys[idx] = spanKey(cpool[idx], by));
+	}
 	function spanKey(tag, by) {
 		const parts = tag.split(' > ');
 		if (by === 'innermost') return parts[parts.length - 1];
@@ -323,13 +327,15 @@
 		return level < parts.length ? parts[level] : '(none)';
 	}
 
-	// Whether a span path belongs to the group `key` under grouping `by`; with owners, nested spans belong too
-	function spanMatches(tag, by, key) {
-		const k = spanKey(tag, by);
-		if (k === key) return true;
-		if (by !== 'chain') return false;
-		const chain = tag.split(' > ').slice(2).filter(p => !SPAN_MARKERS.has(p)).join(' > ');
-		return chain.startsWith(key + ' > ');
+	// Whether the span path at cpool index `idx` belongs to the group `key` under grouping `by`; with owners, nested
+	// spans belong too. Memoized for the last (by, key).
+	let spanMatchFor = null, spanMatchMemo = [];
+	function spanMatches(idx, by, key) {
+		if (spanMatchFor !== by + '\u0000' + key) { spanMatchFor = by + '\u0000' + key; spanMatchMemo = []; }
+		const m = spanMatchMemo[idx];
+		if (m !== undefined) return m;
+		const k = spanKeyOf(idx, by);
+		return spanMatchMemo[idx] = k === key || (by === 'chain' && k.startsWith(key + ' > '));
 	}
 
 	// Per frame: the samples of its own spans that match, and of its subtree (frames are matched to parents by
@@ -340,7 +346,7 @@
 			for (const fr of levels[h]) {
 				let n = 0;
 				const sp = fr.spans;
-				if (sp) for (let j = 0; j < sp.length; j += 2) if (spanMatches(cpool[sp[j]], by, key)) n += sp[j + 1];
+				if (sp) for (let j = 0; j < sp.length; j += 2) if (spanMatches(sp[j], by, key)) n += sp[j + 1];
 				own.set(fr, n);
 				sub.set(fr, n);
 				if (h > 0) { const p = findFrame(levels[h - 1], fr.left); if (p) parentOf.set(fr, p); }
@@ -356,31 +362,29 @@
 	}
 
 	// Keep only the samples taken in matching spans: each frame's width becomes its matching samples, laid out in
-	// the same order (own spans first, as the converter lays out a frame's own samples before its children)
+	// the same order (own spans first, as the converter lays out span leaves before a frame's children)
 	function keepOnlySpans(by, key) {
 		const {own, sub, parentOf} = spanMatchCounts(by, key);
-		const next = new Map();  // frame -> left of its next child
+		const next = new Map();  // original frame -> left of its next child in the filtered layout
 		const out = levels.map(() => []);
 		for (let h = 0; h < levels.length; h++) {
 			for (const fr of levels[h]) {
 				const w = sub.get(fr);
 				if (!w) continue;
-				const p = parentOf.get(fr);
 				let left = 0;
 				if (h > 0) {
-					if (!p || !next.has(p)) continue;
+					const p = parentOf.get(fr);  // has matching samples, since this frame has
 					left = next.get(p);
 					next.set(p, left + w);
 				}
-				const sp = fr.spans, spans = [];
-				if (sp) for (let j = 0; j < sp.length; j += 2) if (spanMatches(cpool[sp[j]], by, key)) spans.push(sp[j], sp[j + 1]);
-				const copy = {...fr, left, width: w, spans: spans.length ? spans : undefined};
-				next.set(copy, left + own.get(fr));
-				next.set(fr, left + own.get(fr));  // children find their parent by the original frame
-				out[h].push(copy);
+				const spans = [];
+				if (fr.spans) for (let j = 0; j < fr.spans.length; j += 2) if (spanMatches(fr.spans[j], by, key)) spans.push(fr.spans[j], fr.spans[j + 1]);
+				next.set(fr, left + own.get(fr));
+				out[h].push({...fr, left, width: w, spans: spans.length ? spans : undefined});
 			}
 		}
 		for (let h = 0; h < levels.length; h++) levels[h] = out[h];
+		levelsChanged();
 		filterHistory.push('span: ' + key);
 		updateFilterChips();
 		openSearch();  // the filter chips are in the search bar
@@ -394,22 +398,27 @@
 	function addSpanHighlight(by, key) {
 		const term = 'span: ' + key;
 		if (highlightChips.some(c => c.term === term)) return;
-		const chip = {term, pattern: /(?!)/, color: currentHighlightColor, span: {by, key}, frames: null, root: null};
+		const chip = {term, pattern: /(?!)/, color: currentHighlightColor, span: {by, key}, frames: null, gen: -1};
 		highlightChips.push(chip);
 		openSearch();  // the highlight chips are in the search bar
 		const used = new Set(highlightChips.map(c => c.color));
 		currentHighlightColor = HIGHLIGHT_COLORS.find(c => !used.has(c)) || HIGHLIGHT_COLORS[0];
 		updateHighlightChips();
+		document.querySelectorAll('.color-swatch').forEach(sw => sw.classList.toggle('selected', sw.dataset.color === currentHighlightColor));
 		render(root);
 	}
 
-	// The frames a span highlight colours, recomputed when the frames have been rebuilt (filter, restore, bottom-up)
+	// Bumped whenever the frames change (filters, removed stacks, restore, bottom-up, sort), for what is computed from them
+	let levelsGen = 0;
+	function levelsChanged() { levelsGen++; }
+
+	// The frames a span highlight colours, recomputed when the frames have changed
 	function spanChipHas(chip, f) {
-		if (chip.root !== levels[0][0]) {
+		if (chip.gen !== levelsGen) {
 			const {sub} = spanMatchCounts(chip.span.by, chip.span.key);
 			chip.frames = new Set();
 			for (const [fr, n] of sub) if (n > 0) chip.frames.add(fr);
-			chip.root = levels[0][0];
+			chip.gen = levelsGen;
 		}
 		return chip.frames.has(f);
 	}
@@ -422,12 +431,19 @@
 	let spanPanelOpen = true;
 	try { spanPanelOpen = localStorage.getItem('flame-spanpanel') !== 'closed'; } catch (ignored) {}
 	document.getElementById('spanhide').onclick = () => { spanPanelOpen = false; setSpanPanelOpen(false); };
-	document.getElementById('spanbtn').onclick = () => { spanPanelOpen = !spanPanelOpen; setSpanPanelOpen(spanPanelOpen); if (spanPanelOpen) drawSpanPanel(spanPanelTarget || root); };
+	document.getElementById('spanbtn').onclick = () => { spanPanelOpen = !spanPanelOpen; setSpanPanelOpen(spanPanelOpen); if (spanPanelOpen) updateSpanPanel(currentFrame || root); };
 
 	// What the panel covers: a frame (hovered, or the zoom root), or the search's matches
 	let spanPanelTarget = null, spanPanelPending = false;
+	let spanButtonShown = false;
 	function updateSpanPanel(fr) {
 		if (!hasSpans || !fr) return;
+		if (!spanButtonShown) {
+			spanButtonShown = true;
+			document.getElementById('spanbtn').style.display = 'inline-block';
+			setSpanPanelOpen(spanPanelOpen);
+		}
+		if (!spanPanelOpen) return;
 		spanPanelTarget = fr === root && pattern && nav && nav.length ? {matches: nav} : fr;
 		if (spanPanelPending) return;
 		spanPanelPending = true;
@@ -461,7 +477,7 @@
 				const sp = frames[i].spans;
 				if (!sp) continue;
 				for (let j = 0; j < sp.length; j += 2) {
-					const k = spanKey(cpool[sp[j]], by);
+					const k = spanKeyOf(sp[j], by);
 					totals.set(k, (totals.get(k) || 0) + sp[j + 1]);
 					sum += sp[j + 1];
 				}
@@ -492,14 +508,12 @@
 			p.textContent = (100 * v / (sum || 1)).toFixed(1) + '%';
 			row.append(name, n, p);
 			row.title = 'Click: keep only these samples. Shift+click: highlight';
-			row.onclick = ((key) => (e) => {
+			row.onclick = (e) => {
 				const by = document.getElementById('spangroup').value;
-				if (e.shiftKey) addSpanHighlight(by, key); else keepOnlySpans(by, key);
-			})(k);
+				if (e.shiftKey) addSpanHighlight(by, k); else keepOnlySpans(by, k);
+			};
 			rows.appendChild(row);
 		}
-		document.getElementById('spanbtn').style.display = 'inline-block';
-		setSpanPanelOpen(spanPanelOpen);
 	}
 
 	document.getElementById('spangroup').onchange = () => drawSpanPanel(spanPanelTarget || root);
@@ -549,6 +563,7 @@
 			}
 			levels[h] = newFrames;
 		}
+		levelsChanged();
 		stacksRemoved = true;
 		document.getElementById('restoreBtn').disabled = false;
 	}
@@ -600,10 +615,12 @@
 					if (firstLeft < 0) firstLeft = r.prefix + (intL - r.left);
 					newWidth += intR - intL;
 				}
-				if (newWidth > 0) newFrames.push({...fr, left: firstLeft, width: newWidth});
+				// a frame cut down keeps its children's samples only: its own (span) samples lie outside the kept ranges
+				if (newWidth > 0) newFrames.push({...fr, left: firstLeft, width: newWidth, spans: newWidth === fr.width ? fr.spans : undefined});
 			}
 			levels[h] = newFrames;
 		}
+		levelsChanged();
 		stacksRemoved = true;
 		document.getElementById('restoreBtn').disabled = false;
 		zoomFactor = 1; panSamples = 0;
@@ -614,6 +631,7 @@
 		for (let h = 0; h < levels.length; h++) {
 			levels[h] = originalLevels[h].map(fr => ({...fr}));
 		}
+		levelsChanged();
 		stacksRemoved = false;
 		filterHistory = [];
 		updateFilterChips();
@@ -1211,17 +1229,18 @@ function findFrame(frames,x){let lo=0,hi=frames.length-1;while(lo<=hi){const mid
 self.onmessage=function(e){
 const levels=e.data.levels,totalFrames=levels.reduce(function(s,lv){return s+lv.length;},0);
 self.postMessage({progress:0.05,stage:'Building parent map\u2026'});
-const parentOf=new Map(),hasChildren=new Set();let done=0;
-for(let h=1;h<levels.length;h++){for(const fr of levels[h]){const p=findFrame(levels[h-1],fr.left);if(p){parentOf.set(fr,p);hasChildren.add(p);}}done+=levels[h].length;if(h%8===0)self.postMessage({progress:0.05+0.2*done/totalFrames,stage:'Building parent map\u2026'});}
+const parentOf=new Map(),childWidth=new Map();let done=0;
+for(let h=1;h<levels.length;h++){for(const fr of levels[h]){const p=findFrame(levels[h-1],fr.left);if(p){parentOf.set(fr,p);childWidth.set(p,(childWidth.get(p)||0)+fr.width);}}done+=levels[h].length;if(h%8===0)self.postMessage({progress:0.05+0.2*done/totalFrames,stage:'Building parent map\u2026'});}
 self.postMessage({progress:0.27,stage:'Finding leaves\u2026'});
 const root=levels[0][0],leaves=[];
-for(let h=1;h<levels.length;h++)for(const fr of levels[h])if(!hasChildren.has(fr))leaves.push(fr);
+// every frame with samples of its own, not only frames without children: [frame, own samples]
+for(let h=1;h<levels.length;h++)for(const fr of levels[h]){const own=fr.width-(childWidth.get(fr)||0);if(own>0)leaves.push([fr,own]);}
 self.postMessage({progress:0.32,stage:'Building reverse tree\u2026'});
 const trieRoot={title:root.title,width:root.width,color:root.color,details:root.details||'',children:new Map()};
-for(let i=0;i<leaves.length;i++){const leaf=leaves[i],stack=[];let fr=leaf;while(fr&&fr!==root){stack.push(fr);fr=parentOf.get(fr);}let node=trieRoot;for(const frame of stack){let child=node.children.get(frame.title);if(!child){child={title:frame.title,width:0,color:frame.color,details:frame.details||'',children:new Map()};node.children.set(frame.title,child);}child.width+=leaf.width;node=child;}if(leaf.spans){const sp=node.spans||(node.spans=[]);for(let j=0;j<leaf.spans.length;j++)sp.push(leaf.spans[j]);}if(i%100===0)self.postMessage({progress:0.32+0.38*i/leaves.length,stage:'Building reverse tree\u2026'});}
+for(let i=0;i<leaves.length;i++){const leaf=leaves[i][0],own=leaves[i][1],stack=[];let fr=leaf;while(fr&&fr!==root){stack.push(fr);fr=parentOf.get(fr);}let node=trieRoot;for(const frame of stack){let child=node.children.get(frame.title);if(!child){child={title:frame.title,width:0,color:frame.color,details:frame.details||'',children:new Map()};node.children.set(frame.title,child);}child.width+=own;node=child;}if(leaf.spans){const sp=node.spans||(node.spans=[]);for(let j=0;j<leaf.spans.length;j++)sp.push(leaf.spans[j]);}if(i%100===0)self.postMessage({progress:0.32+0.38*i/leaves.length,stage:'Building reverse tree\u2026'});}
 self.postMessage({progress:0.72,stage:'Computing layout\u2026'});
 const newLevels=[];let pos=0;
-function layout(node,depth){if(!newLevels[depth])newLevels[depth]=[];const start=pos;if(node.children.size===0){pos+=node.width;}else{const kids=Array.from(node.children.values()).sort(function(a,b){return b.width-a.width;});for(const k of kids)layout(k,depth+1);}const out={level:depth,left:start,width:pos-start,color:node.color,title:node.title,details:node.details};if(node.spans)out.spans=node.spans;newLevels[depth].push(out);}
+function layout(node,depth){if(!newLevels[depth])newLevels[depth]=[];const start=pos;const kids=Array.from(node.children.values()).sort(function(a,b){return b.width-a.width;});let kw=0;for(const k of kids)kw+=k.width;pos+=node.width-kw;for(const k of kids)layout(k,depth+1);const out={level:depth,left:start,width:pos-start,color:node.color,title:node.title,details:node.details};if(node.spans)out.spans=node.spans;newLevels[depth].push(out);}
 layout(trieRoot,0);
 for(const lv of newLevels)lv.sort(function(a,b){return a.left-b.left;});
 self.postMessage({progress:1.0,stage:'Done'});self.postMessage({result:newLevels});};`;
@@ -1229,6 +1248,7 @@ self.postMessage({progress:1.0,stage:'Done'});self.postMessage({result:newLevels
 	function _swapLevels(src) {
 		levels.length = 0;
 		for (const lv of src) levels.push(lv.map(fr => ({...fr})));
+		levelsChanged();
 	}
 
 	function _resetView() {

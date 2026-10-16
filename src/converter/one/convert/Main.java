@@ -154,6 +154,7 @@ public class Main {
                 "  -s --state LIST       Filter thread states: runnable, sleeping\n" +
                 "     --classify         Classify samples into predefined categories\n" +
                 "     --spans            Add the tags of the enclosing spans (outermost first) as a leaf frame, for the span panel\n" +
+                "                        (html and collapsed output, not reversed; --include/--exclude also match it)\n" +
                 "     --total            Accumulate total value (time, bytes, etc.)\n" +
                 "     --lines            Show line numbers\n" +
                 "     --bci              Show bytecode indices\n" +

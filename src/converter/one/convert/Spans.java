@@ -15,8 +15,9 @@ import java.util.Map;
 
 /**
  * The spans of each thread, to tag a sample with the path of spans enclosing it, outermost first, ' > ' separated.
- * Spans on one thread are taken to nest (a span that starts inside another ends inside it), as spans recorded
- * around nested regions of code do.
+ * Spans are half-open, [start, end). Spans on one thread are expected to nest (a span that starts inside another ends
+ * inside it), as spans recorded around nested regions of code do; a span is the parent of a later one only if it
+ * contains it entirely.
  */
 final class Spans {
     private final Map<Integer, ThreadSpans> byThread = new HashMap<>();
@@ -68,7 +69,9 @@ final class Spans {
                 starts[i] = s[0];
                 ends[i] = s[1];
                 tags[i] = (int) s[2];
-                while (depth > 0 && ends[open[depth - 1]] < s[0]) depth--;
+                // close the spans that end before this one starts (half-open: one ending where this starts is closed)
+                // or that do not contain it (overlapping without nesting)
+                while (depth > 0 && (ends[open[depth - 1]] <= s[0] || ends[open[depth - 1]] < s[1])) depth--;
                 parents[i] = depth > 0 ? open[depth - 1] : -1;
                 open[depth++] = i;
             }
@@ -80,7 +83,7 @@ final class Spans {
             int i = Arrays.binarySearch(starts, t);
             if (i < 0) i = -i - 2;
             else while (i + 1 < starts.length && starts[i + 1] == t) i++;
-            while (i >= 0 && ends[i] < t) i = parents[i];
+            while (i >= 0 && ends[i] <= t) i = parents[i];
             return i < 0 ? null : path(i);
         }
 
@@ -94,7 +97,7 @@ final class Spans {
         }
     }
 
-    /** An event with the tag of its span, grouped by tag as well as by its own grouping */
+    /** An event with the path of the spans enclosing it, grouped by path as well as by its own grouping */
     static final class TaggedEvent extends Event {
         final Event event;
         final String tag;

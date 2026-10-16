@@ -181,7 +181,9 @@ public class FlameGraph implements Comparator<Frame> {
         frame.total += ticks;
         frame.self += ticks;
 
-        depth = Math.max(depth, stack.size);
+        int size = stack.size;
+        if (size > 0 && stack.types[size - 1] == TYPE_SPAN) size--;  // span leaves are not drawn
+        depth = Math.max(depth, size);
     }
 
     public void diff(FlameGraph base) {
@@ -212,8 +214,8 @@ public class FlameGraph implements Comparator<Frame> {
 
     public void dump(PrintStream out) {
         mintotal = (long) (root.total * args.minwidth / 100);
-        if (args.spans && mintotal > 1) {
-            rollUpSpans(root);
+        if (mintotal > 1) {
+            rollUpSpans(root);  // also for a graph read back from html or collapsed output
         }
 
         if ("collapsed".equals(args.output)) {
@@ -380,7 +382,7 @@ public class FlameGraph implements Comparator<Frame> {
 
         if (!frame.isEmpty()) {
             for (Frame child : frame.values()) {
-                if (child.total >= mintotal) {
+                if (child.total >= mintotal || child.getType() == TYPE_SPAN) {
                     printFrameCollapsed(out, child, strings);
                 }
             }
@@ -494,6 +496,10 @@ public class FlameGraph implements Comparator<Frame> {
     private static String escape(String s) {
         if (s.indexOf('\\') >= 0) s = s.replace("\\", "\\\\");
         if (s.indexOf('\'') >= 0) s = s.replace("'", "\\'");
+        // span tags are arbitrary strings: keep them from ending the script or the string literal
+        if (s.indexOf('<') >= 0) s = s.replace("<", "\\x3c");
+        if (s.indexOf('\n') >= 0) s = s.replace("\n", "\\n");
+        if (s.indexOf('\r') >= 0) s = s.replace("\r", "\\r");
         return s;
     }
 
@@ -505,6 +511,9 @@ public class FlameGraph implements Comparator<Frame> {
 
     @Override
     public int compare(Frame f1, Frame f2) {
+        // span leaves first, so a frame's own samples are contiguous
+        boolean s1 = f1.getType() == TYPE_SPAN, s2 = f2.getType() == TYPE_SPAN;
+        if (s1 != s2) return s1 ? -1 : 1;
         return order[f1.getTitleIndex()] - order[f2.getTitleIndex()];
     }
 

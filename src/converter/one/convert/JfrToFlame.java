@@ -28,6 +28,12 @@ public class JfrToFlame extends JfrConverter {
     }
 
     @Override
+    protected boolean supportsSpans() {
+        // the span path is a leaf of each stack; reversed, it would be the root (the viewer has its own bottom-up view)
+        return !args.reverse && !(args.nativemem && args.leak);
+    }
+
+    @Override
     protected void convertChunk() {
         collector.forEach(new AggregatedEventVisitor() {
             final CallStack stack = new CallStack();

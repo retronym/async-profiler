@@ -23,7 +23,8 @@ public abstract class JfrConverter extends Classifier {
     protected final Arguments args;
     protected final EventCollector collector;
     protected Dictionary<String> methodNames;
-    // With --spans: each thread's spans, to tag each sample with its innermost span
+    // With --spans, for converters that support it: each thread's spans, to tag each sample with the path of the spans
+    // enclosing it
     private Spans spans;
 
     public JfrConverter(JfrReader jfr, Arguments args) {
@@ -36,7 +37,7 @@ public abstract class JfrConverter extends Classifier {
 
     public void convert() throws IOException {
         Filter filter = readFilter();
-        spans = args.spans ? readSpans() : null;
+        spans = args.spans && supportsSpans() ? readSpans() : null;
 
         jfr.stopAtNewChunk = true;
         while (jfr.hasMoreChunks()) {
@@ -82,12 +83,17 @@ public abstract class JfrConverter extends Classifier {
         return new Filter(deltas);
     }
 
+    /** Whether this converter shows span paths (--spans): it must unwrap Spans.TaggedEvent itself */
+    protected boolean supportsSpans() {
+        return false;
+    }
+
     private Spans readSpans() throws IOException {
         Spans spans = new Spans();
         jfr.stopAtNewChunk = true;
         while (jfr.hasMoreChunks()) {
-            for (IntervalEvent event; (event = jfr.readEvent(IntervalEvent.class)) != null; ) {
-                if (event instanceof SpanEvent && event.tag() != null) {
+            for (SpanEvent event; (event = jfr.readEvent(SpanEvent.class)) != null; ) {
+                if (event.tag() != null) {
                     spans.add(event.tid, jfr.eventTimeToNanos(event.time), jfr.eventTimeToNanos(event.time + event.duration), event.tag());
                 }
             }

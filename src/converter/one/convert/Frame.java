@@ -15,7 +15,7 @@ public class Frame extends HashMap<Integer, Frame> {
     public static final byte TYPE_CPP = 4;
     public static final byte TYPE_KERNEL = 5;
     public static final byte TYPE_C1_COMPILED = 6;
-    // The tag of the span a sample was taken in (--spans): a leaf after the stack, for the viewer's span panel
+    // The path of the spans a sample was taken in (--spans): a leaf after the stack, for the viewer's span panel
     public static final byte TYPE_SPAN = 7;
 
     static final int TYPE_SHIFT = 28;
@@ -59,7 +59,7 @@ public class Frame extends HashMap<Integer, Frame> {
         int depth = 0;
         if (size() > 0) {
             for (Frame child : values()) {
-                if (child.total >= cutoff) {
+                if (child.total >= cutoff && child.getType() != TYPE_SPAN) {  // span leaves are not drawn
                     depth = Math.max(depth, child.depth(cutoff));
                 }
             }
