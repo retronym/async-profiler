@@ -9,6 +9,7 @@
 #ifdef __APPLE__
 
 #include <pthread.h>
+#include "arch.h"
 #include "engine.h"
 #include "kperfProtocol.h"
 
