@@ -4,7 +4,15 @@
 /target/
 /.idea/
 /test/*.class
+.agents
+.claude
+.codex
+.cursor
+.gemini
+.kiro
 .vscode
 *.iml
 /src/api/**/*.class
 .gdb_history
+async-profiler-*.tar.gz
+async-profiler-*.zip

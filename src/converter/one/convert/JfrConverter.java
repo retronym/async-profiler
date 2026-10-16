@@ -11,7 +11,9 @@ import one.jfr.event.*;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.BitSet;
+import java.util.HashMap;
 import java.util.Map;
+import java.util.TreeMap;
 import java.util.regex.Pattern;
 
 import static one.convert.Frame.*;
@@ -31,7 +33,7 @@ public abstract class JfrConverter extends Classifier {
     }
 
     public void convert() throws IOException {
-        TimeIntervals timeIntervals = readLatencyTimeIntervals();
+        Filter filter = readFilter();
 
         jfr.stopAtNewChunk = true;
         while (jfr.hasMoreChunks()) {
@@ -39,7 +41,7 @@ public abstract class JfrConverter extends Classifier {
             methodNames = new Dictionary<>();
 
             collector.beforeChunk();
-            collectEvents(timeIntervals);
+            collectEvents(filter);
             collector.afterChunk();
 
             convertChunk();
@@ -50,36 +52,38 @@ public abstract class JfrConverter extends Classifier {
         }
     }
 
-    protected final TimeIntervals readLatencyTimeIntervals() throws IOException {
-        if (args.latency < 0) return null;
+    protected final Filter readFilter() throws IOException {
+        if (args.latency < 0 && args.tag == null) return null;
 
-        TimeIntervals.Builder intervalsBuilder = new TimeIntervals.Builder();
-        boolean foundMethodTrace = false; // We'll throw an exception if none is found
+        Map<Integer, TreeMap<Long, Integer>> deltas = new HashMap<>();
+        boolean found = false;  // we'll throw an exception if none is found
 
         jfr.stopAtNewChunk = true;
         while (jfr.hasMoreChunks()) {
-            long minLatencyTicks = args.latency * jfr.ticksPerSec / 1000;
-            MethodTrace event;
-            while ((event = jfr.readEvent(MethodTrace.class)) != null) {
-                foundMethodTrace = true;
-                if (event.duration >= minLatencyTicks) {
-                    intervalsBuilder.add(jfr.eventTimeToNanos(event.time), jfr.eventTimeToNanos(event.time + event.duration));
+            long minLatencyTicks = (long) (args.latency * (jfr.ticksPerSec / 1e9));
+            Pattern requiredTag = args.tag;
+            for (IntervalEvent event; (event = jfr.readEvent(IntervalEvent.class)) != null; found = true) {
+                if (event.duration >= minLatencyTicks && (requiredTag == null
+                        || event.tag() != null && requiredTag.matcher(event.tag()).matches())) {
+                    TreeMap<Long, Integer> threadDeltas = deltas.computeIfAbsent(event.tid, k -> new TreeMap<>());
+                    threadDeltas.merge(jfr.eventTimeToNanos(event.time), 1, Integer::sum);
+                    threadDeltas.merge(jfr.eventTimeToNanos(event.time + event.duration), -1, Integer::sum);
                 }
             }
         }
         jfr.rewind();
 
-        if (!foundMethodTrace) {
-            throw new RuntimeException("No jdk.MethodTrace events found");
+        if (!found) {
+            throw new RuntimeException("No Span/MethodTrace events found");
         }
-        return intervalsBuilder.build();
+        return new Filter(deltas);
     }
 
     protected EventCollector createCollector(Arguments args) {
         return new EventAggregator(args.threads, args.grain);
     }
 
-    protected void collectEvents(TimeIntervals timeIntervals) throws IOException {
+    protected void collectEvents(Filter filter) throws IOException {
         // args.nativemem ? MallocEvent.class should always be first for the leak detection feature
         Class<? extends Event> eventClass = args.hw != null ? HardwareSample.class
                 : args.nativemem ? MallocEvent.class
@@ -114,7 +118,7 @@ public abstract class JfrConverter extends Classifier {
                     continue;
                 }
                 if (threadStates == null || threadStates.get(((ExecutionSample) event).threadState)) {
-                    if (timeIntervals == null || timeIntervals.contains(jfr.eventTimeToNanos(event.time))) {
+                    if (filter == null || filter.matches(event.tid, jfr.eventTimeToNanos(event.time))) {
                         collector.collect(event);
                     }
                 }
@@ -156,14 +160,16 @@ public abstract class JfrConverter extends Classifier {
         }
 
         StackTrace stackTrace = jfr.stackTraces.get(stackId);
-        for (int i = 0; i < stackTrace.methods.length; i++) {
-            String name = getMethodName(stackTrace.methods[i], stackTrace.types[i]);
-            if (exclude != null && exclude.matcher(name).matches()) {
-                return true;
-            }
-            if (include != null && include.matcher(name).matches()) {
-                if (exclude == null) return false;
-                include = null;
+        if (stackTrace != null) {
+            for (int i = 0; i < stackTrace.methods.length; i++) {
+                String name = getMethodName(stackTrace.methods[i], stackTrace.types[i]);
+                if (exclude != null && exclude.matcher(name).matches()) {
+                    return true;
+                }
+                if (include != null && include.matcher(name).matches()) {
+                    if (exclude == null) return false;
+                    include = null;
+                }
             }
         }
         return include != null;
@@ -343,7 +349,7 @@ public abstract class JfrConverter extends Classifier {
         if (args.hw != null) return args.hw;
         if (args.nativemem) return "malloc";
         if (args.alloc || args.live) return "allocations";
-        if (args.lock) return "locks";
+        if (args.lock || args.nativelock) return "locks";
         return "cpu";
     }
 
@@ -358,11 +364,11 @@ public abstract class JfrConverter extends Classifier {
     }
 
     public double counterFactor() {
-        return (args.lock || args.nativelock) ? jfr.nanosPerTick : 1.0;
+        return (args.lock || args.nativelock || args.trace) ? jfr.nanosPerTick : 1.0;
     }
 
     // Select sum(samples) or sum(value) depending on the --total option.
-    // For lock and nativelock events, convert lock duration from ticks to nanoseconds.
+    // For lock, nativelock and trace events, convert duration from ticks to nanoseconds.
     protected abstract class AggregatedEventVisitor implements EventCollector.Visitor {
         // Hardware samples are weighted by event count by default; --total is implied
         private final double factor = !args.total && args.hw == null ? 0.0 : counterFactor();

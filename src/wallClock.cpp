@@ -3,10 +3,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include <map>
 #include <string.h>
 #include <unistd.h>
 #include <sys/types.h>
 #include "wallClock.h"
+#include "mutex.h"
 #include "profiler.h"
 #include "stackFrame.h"
 #include "tsc.h"
@@ -22,9 +24,11 @@ const int THREADS_PER_TICK = 8;
 // Smaller intervals are practically unusable due to large overhead.
 const long long MIN_INTERVAL = 100000;
 
-// How much CPU time a thread can spend after being sampled as idle
-// until it is considered runnable.
-const u64 RUNNABLE_THRESHOLD_NS = 10000;
+// A thread that ran for less than IDLE_THRESHOLD_NS since last iteration is considered idle.
+const u64 IDLE_THRESHOLD_NS = 10000;
+
+// Maximum amount of CPU time a thread may spend to be eligible for wall clock event batching.
+const u64 BATCH_CPU_THRESHOLD_NS = 500000;
 
 // How many skipped idle samples can be recorded in a single WallClock event.
 const u32 MAX_IDLE_BATCH = 1000;
@@ -34,6 +38,7 @@ struct ThreadSleepState {
     u64 start_time;
     u64 last_time;
     u64 last_cpu_time;
+    u64 fingerprint;
     u32 call_trace_id;
     u32 counter;
 };
@@ -42,6 +47,7 @@ typedef std::map<int, ThreadSleepState> ThreadSleepMap;
 
 struct ThreadCpuTime {
     u64 cpu_time;
+    u64 fingerprint;
     u64 trace;
 };
 
@@ -70,8 +76,9 @@ class ThreadCpuTimeBuffer {
         storeRelease(_write_ptr, 0);
     }
 
-    void add(u64 trace) {
+    void add(u64 fingerprint, u64 trace) {
         ThreadCpuTime& t = _ringbuf[atomicInc(_write_ptr) & (RINGBUF_SIZE - 1)];
+        t.fingerprint = fingerprint;
         t.trace = trace;
         storeRelease(t.cpu_time, OS::threadCpuTime(0));
     }
@@ -85,11 +92,13 @@ class ThreadCpuTimeBuffer {
                 break;
             }
 
+            u64 fingerprint = t.fingerprint;
             u64 trace = t.trace;
             if (__sync_bool_compare_and_swap(&t.cpu_time, cpu_time, 0)) {
                 int thread_id = trace >> 32;
                 ThreadSleepState& tss = thread_sleep_state[thread_id];
                 tss.last_cpu_time = cpu_time;
+                tss.fingerprint = fingerprint;
                 tss.call_trace_id = (u32)trace;
                 tss.counter = 0;
                 _read_ptr++;
@@ -99,47 +108,55 @@ class ThreadCpuTimeBuffer {
 };
 
 static ThreadCpuTimeBuffer _thread_cpu_time_buf;
+static ThreadSleepMap _thread_sleep_state;
+static Mutex _thread_sleep_state_lock;
 
 
 long WallClock::_interval;
 int WallClock::_signal;
 WallClock::Mode WallClock::_mode;
 
-ThreadState WallClock::getThreadState(void* ucontext) {
+// Gets fingerprint (as in OS::threadFingerprint) from the signal context of the current thread.
+// Fingerprint is zero for running threads and non-zero for threads blocked on a syscall.
+u64 WallClock::getThreadFingerprint(void* ucontext) {
     StackFrame frame(ucontext);
     uintptr_t pc = frame.pc();
 
     // Consider a thread sleeping, if it has been interrupted in the middle of syscall execution,
     // either when PC points to the syscall instruction, or if syscall has just returned with EINTR
     if (StackFrame::isSyscall((instruction_t*)pc)) {
-        return THREAD_SLEEPING;
+        return ((u64)frame.sp() << 32) ^ (pc + SYSCALL_SIZE);
     }
 
     // Make sure the previous instruction address is readable
     uintptr_t prev_pc = pc - SYSCALL_SIZE;
     if ((pc & 0xfff) >= SYSCALL_SIZE || Profiler::instance()->findLibraryByAddress((instruction_t*)prev_pc) != NULL) {
         if (StackFrame::isSyscall((instruction_t*)prev_pc) && frame.checkInterruptedSyscall()) {
-            return THREAD_SLEEPING;
+            return ((u64)frame.sp() << 32) ^ pc;
         }
     }
 
-    return THREAD_RUNNING;
+    return 0;
 }
 
 void WallClock::signalHandler(int signo, siginfo_t* siginfo, void* ucontext) {
+    u64 start_time = TSC::ticks();
     if (_mode == WALL_BATCH) {
+        u64 fingerprint = getThreadFingerprint(ucontext);
         WallClockEvent event;
-        event._start_time = TSC::ticks();
+        event._start_time = start_time;
         event._time_span = 0;
-        event._thread_state = getThreadState(ucontext);
+        event._thread_state = fingerprint == 0 ? THREAD_RUNNING : THREAD_SLEEPING;
         event._samples = 1;
         u64 trace = Profiler::instance()->recordSample(ucontext, _interval, WALL_CLOCK_SAMPLE, &event);
-        if (event._thread_state == THREAD_SLEEPING && trace != 0) {
-            _thread_cpu_time_buf.add(trace);
+        if (fingerprint != 0 && trace != 0) {
+            _thread_cpu_time_buf.add(fingerprint, trace);
         }
     } else {
-        ExecutionEvent event(TSC::ticks());
-        event._thread_state = _mode == CPU_ONLY ? THREAD_UNKNOWN : getThreadState(ucontext);
+        ExecutionEvent event(start_time);
+        if (_mode != CPU_ONLY) {
+            event._thread_state = getThreadFingerprint(ucontext) == 0 ? THREAD_RUNNING : THREAD_SLEEPING;
+        }
         Profiler::instance()->recordSample(ucontext, _interval, EXECUTION_SAMPLE, &event);
     }
 }
@@ -185,13 +202,24 @@ void WallClock::stop() {
     pthread_join(_thread, NULL);
 }
 
+void WallClock::flush() {
+    if (_mode != WALL_BATCH) return;
+
+    MutexLocker ml(_thread_sleep_state_lock);
+    for (ThreadSleepMap::iterator it = _thread_sleep_state.begin(); it != _thread_sleep_state.end(); ++it) {
+        if (it->second.counter != 0) {
+            recordWallClock(it->second, THREAD_SLEEPING, it->first);
+            it->second.counter = 0;
+        }
+    }
+}
+
 void WallClock::timerLoop() {
     int self = OS::threadId();
     ThreadFilter* thread_filter = Profiler::instance()->threadFilter();
     bool thread_filter_enabled = thread_filter->enabled();
     Mode mode = _mode;
 
-    ThreadSleepMap thread_sleep_state;
     ThreadList* thread_list = OS::listThreads();
     _thread_cpu_time_buf.reset();
     u64 cycle_start_time = OS::nanotime();
@@ -205,7 +233,7 @@ void WallClock::timerLoop() {
                 // On macOS, task_threads() may sporadically return 0 or -1 among thread IDs
                 continue;
             }
-            if (thread_filter_enabled && !thread_filter->accept(thread_id)) {
+            if (thread_filter_enabled && !thread_filter->contains(thread_id)) {
                 continue;
             }
 
@@ -214,15 +242,32 @@ void WallClock::timerLoop() {
                     continue;
                 }
             } else if (mode == WALL_BATCH) {
-                ThreadSleepState& tss = thread_sleep_state[thread_id];
-                u64 new_thread_cpu_time = enabled ? OS::threadCpuTime(thread_id) : 0;
-                if (new_thread_cpu_time != 0 && new_thread_cpu_time - tss.last_cpu_time <= RUNNABLE_THRESHOLD_NS) {
-                    tss.last_time = TSC::ticks();
-                    if (++tss.counter < MAX_IDLE_BATCH) {
-                        if (tss.counter == 1) {
-                            tss.start_time = tss.last_time;
+                MutexLocker ml(_thread_sleep_state_lock);
+                ThreadSleepState& tss = _thread_sleep_state[thread_id];
+                if (enabled && tss.last_cpu_time != 0) {
+                    u64 cpu_time_delta = OS::threadCpuTime(thread_id) - tss.last_cpu_time;
+                    // Fast check: thread has not spent enough CPU time since last sampling
+                    bool idle = cpu_time_delta <= IDLE_THRESHOLD_NS;
+                    // 2nd level check: thread spent some CPU time, but is now blocked on the same syscall
+                    if (!idle && cpu_time_delta <= BATCH_CPU_THRESHOLD_NS &&
+                            tss.fingerprint != 0 && OS::threadFingerprint(thread_id) == tss.fingerprint) {
+                        tss.last_cpu_time += cpu_time_delta;
+                        idle = true;
+                    }
+                    // Fingerprint check is one-shot protection from EINTR wakeup.
+                    // We still need to detect genuine wakeups.
+                    tss.fingerprint = 0;
+
+                    if (idle) {
+                        tss.last_time = TSC::ticks();
+                        if (++tss.counter < MAX_IDLE_BATCH) {
+                            if (tss.counter == 1) {
+                                tss.start_time = tss.last_time;
+                            }
+                            continue;
                         }
-                        continue;
+                    } else {
+                        tss.last_cpu_time = 0;
                     }
                 }
                 if (tss.counter != 0) {
@@ -254,16 +299,12 @@ void WallClock::timerLoop() {
         }
 
         // Sync thread CPU times updated since the previous iteration
-        _thread_cpu_time_buf.drain(thread_sleep_state);
+        MutexLocker ml(_thread_sleep_state_lock);
+        _thread_cpu_time_buf.drain(_thread_sleep_state);
     }
 
     delete thread_list;
 
-    // Flush remaining WallClock batches
-    for (ThreadSleepMap::const_iterator it = thread_sleep_state.begin(); it != thread_sleep_state.end(); ++it) {
-        const ThreadSleepState& tss = it->second;
-        if (tss.counter != 0) {
-            recordWallClock(tss, THREAD_SLEEPING, it->first);
-        }
-    }
+    flush();
+    _thread_sleep_state.clear();
 }

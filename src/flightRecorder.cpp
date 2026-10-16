@@ -17,11 +17,13 @@
 #include <unistd.h>
 #include "flightRecorder.h"
 #include "incbin.h"
+#include "javaApi.h"
 #include "jfrMetadata.h"
 #include "lookup.h"
 #include "os.h"
 #include "processSampler.h"
 #include "profiler.h"
+#include "rateLimit.h"
 #include "spinLock.h"
 #include "symbols.h"
 #include "threadFilter.h"
@@ -49,6 +51,17 @@ const u64 MIN_JLONG = 0x8000000000000000ULL;
 enum GCWhen {
     BEFORE_GC,
     AFTER_GC
+};
+
+static constexpr unsigned char JFR_TYPE_FOR_CATEGORY[EC_CATEGORIES] = {
+    T_EXECUTION_SAMPLE,   // EC_CPU
+    T_ALLOC_IN_NEW_TLAB,  // EC_ALLOC
+    T_MONITOR_ENTER,      // EC_LOCK
+    T_WALL_CLOCK_SAMPLE,  // EC_WALL
+    T_MALLOC,             // EC_NATIVEMEM
+    T_NATIVE_LOCK,        // EC_NATIVELOCK
+    T_METHOD_TRACE,       // EC_TRACE
+    T_SPAN,               // EC_SPAN
 };
 
 
@@ -233,8 +246,9 @@ class Recording {
     int _memfd;
     char* _master_recording_file;
     off_t _chunk_start;
-    ThreadFilter _thread_set;
+    ThreadBitSet _thread_set;
     MethodMap _method_map;
+    Dictionary _string_pool;
 
     u64 _start_time;
     u64 _start_ticks;
@@ -263,7 +277,7 @@ class Recording {
     }
 
   public:
-    Recording(int fd, const char* master_recording_file, Arguments& args) : _fd(fd), _thread_set(), _method_map() {
+    Recording(int fd, const char* master_recording_file, Arguments& args) : _fd(fd) {
         _master_recording_file = master_recording_file == NULL ? NULL : strdup(master_recording_file);
         _chunk_start = lseek(_fd, 0, SEEK_END);
         _start_time = OS::micros();
@@ -635,7 +649,8 @@ class Recording {
         writeStringSetting(buf, T_ACTIVE_RECORDING, "cstack", SETTING_CSTACK[args._cstack]);
         writeStringSetting(buf, T_ACTIVE_RECORDING, "clock", TSC::enabled() ? "tsc" : "monotonic");
         writeStringSetting(buf, T_ACTIVE_RECORDING, "event", args._event);
-        writeStringSetting(buf, T_ACTIVE_RECORDING, "filter", args._filter);
+        writeListSetting(buf, T_ACTIVE_RECORDING, "ithread", args._threads_include);
+        writeListSetting(buf, T_ACTIVE_RECORDING, "xthread", args._threads_exclude);
         writeStringSetting(buf, T_ACTIVE_RECORDING, "begin", args._begin);
         writeStringSetting(buf, T_ACTIVE_RECORDING, "end", args._end);
         writeListSetting(buf, T_ACTIVE_RECORDING, "include", args._include);
@@ -645,6 +660,12 @@ class Recording {
         writeIntSetting(buf, T_ACTIVE_RECORDING, "chunksize", args._chunk_size);
         writeIntSetting(buf, T_ACTIVE_RECORDING, "chunktime", args._chunk_time);
         writeIntSetting(buf, T_ACTIVE_RECORDING, "memlimit", args._mem_limit);
+
+        for (int i = 0; i < EC_CATEGORIES; i++) {
+            if (args._rate_limit[i] >= 0) {
+                writeIntSetting(buf, JFR_TYPE_FOR_CATEGORY[i], "ratelimit", args._rate_limit[i]);
+            }
+        }
 
         char str[256];
         writeStringSetting(buf, T_ACTIVE_RECORDING, "features", getFeaturesString(str, sizeof(str), args._features));
@@ -829,7 +850,7 @@ class Recording {
         buf->putVar32(0);
         buf->putVar32(1);
 
-        buf->putVar32(11);
+        buf->putVar32(12);
 
         Index packages(1);
         Index symbols(1);
@@ -843,6 +864,7 @@ class Recording {
         writeClasses(buf, &lookup);
         writePackages(buf, &lookup);
         writeSymbols(buf, &lookup);
+        writeStrings(buf);
         writeUserEventTypes(buf);
         // Write log levels last. The order does not affect the JFR's validity,
         // but log levels have an easily-visible format that makes it easy
@@ -859,8 +881,17 @@ class Recording {
             // Write a dummy String pool of 1 element instead.
             buf->putVar32(T_STRING);
             buf->putVar32(1);
-            buf->putVar32(1);  // key
+            buf->putVar32(0);  // key
             buf->put8(0);      // null string
+        }
+    }
+
+    void writeStringMap(Buffer* buf, JfrType type, std::map<u32, const char*>& strings) {
+        writePoolHeader(buf, type, strings.size());
+        for (std::map<u32, const char*>::const_iterator it = strings.begin(); it != strings.end(); ++it) {
+            flushIfNeeded(buf, RECORDING_BUFFER_LIMIT - MAX_STRING_LENGTH);
+            buf->putVar32(it->first);
+            buf->putUtf8(it->second);
         }
     }
 
@@ -1019,24 +1050,29 @@ class Recording {
         });
     }
 
-    void writeLogLevels(Buffer* buf) {
-        buf->putVar32(T_LOG_LEVEL);
-        buf->putVar32(LOG_ERROR - LOG_TRACE + 1);
-        for (int i = LOG_TRACE; i <= LOG_ERROR; i++) {
-            buf->putVar32(i);
-            buf->putUtf8(Log::LEVEL_NAME[i]);
-        }
+    void writeStrings(Buffer* buf) {
+        std::map<u32, const char*> strings;
+        _string_pool.collect(strings);
+
+        writeStringMap(buf, T_STRING, strings);
+
+        // String pool is only updated under the lock - safe to clear here
+        _string_pool.clear();
     }
 
     void writeUserEventTypes(Buffer* buf) {
         std::map<u32, const char*> events;
         UserEvents::collect(events);
 
-        writePoolHeader(buf, T_USER_EVENT_TYPE, events.size());
-        for (std::map<u32, const char*>::const_iterator it = events.begin(); it != events.end(); ++it) {
-            flushIfNeeded(buf, RECORDING_BUFFER_LIMIT - MAX_STRING_LENGTH);
-            buf->putVar32(it->first);
-            buf->putUtf8(it->second);
+        writeStringMap(buf, T_USER_EVENT_TYPE, events);
+    }
+
+    void writeLogLevels(Buffer* buf) {
+        buf->putVar32(T_LOG_LEVEL);
+        buf->putVar32(LOG_ERROR - LOG_TRACE + 1);
+        for (int i = LOG_TRACE; i <= LOG_ERROR; i++) {
+            buf->putVar32(i);
+            buf->putUtf8(Log::LEVEL_NAME[i]);
         }
     }
 
@@ -1074,24 +1110,26 @@ class Recording {
     }
 
     void recordAllocationInNewTLAB(Buffer* buf, int tid, u32 call_trace_id, AllocEvent* event) {
+        u32 class_id = event->classId();
         int start = buf->skip(1);
         buf->put8(T_ALLOC_IN_NEW_TLAB);
         buf->putVar64(event->_start_time);
         buf->putVar32(tid);
         buf->putVar32(call_trace_id);
-        buf->putVar32(event->_class_id);
+        buf->putVar32(class_id);
         buf->putVar64(event->_instance_size);
         buf->putVar64(event->_total_size);
         buf->put8(start, buf->offset() - start);
     }
 
     void recordAllocationOutsideTLAB(Buffer* buf, int tid, u32 call_trace_id, AllocEvent* event) {
+        u32 class_id = event->classId();
         int start = buf->skip(1);
         buf->put8(T_ALLOC_OUTSIDE_TLAB);
         buf->putVar64(event->_start_time);
         buf->putVar32(tid);
         buf->putVar32(call_trace_id);
-        buf->putVar32(event->_class_id);
+        buf->putVar32(class_id);
         buf->putVar64(event->_total_size);
         buf->put8(start, buf->offset() - start);
     }
@@ -1163,38 +1201,41 @@ class Recording {
     }
 
     void recordLiveObject(Buffer* buf, int tid, u32 call_trace_id, LiveObject* event) {
+        u32 class_id = event->classId();
         int start = buf->skip(1);
         buf->put8(T_LIVE_OBJECT);
         buf->putVar64(event->_start_time);
         buf->putVar32(tid);
         buf->putVar32(call_trace_id);
-        buf->putVar32(event->_class_id);
+        buf->putVar32(class_id);
         buf->putVar64(event->_alloc_size);
         buf->putVar64(event->_alloc_time);
         buf->put8(start, buf->offset() - start);
     }
 
     void recordMonitorBlocked(Buffer* buf, int tid, u32 call_trace_id, LockEvent* event) {
+        u32 class_id = event->classId();
         int start = buf->skip(1);
         buf->put8(T_MONITOR_ENTER);
         buf->putVar64(event->_start_time);
         buf->putVar64(event->_end_time - event->_start_time);
         buf->putVar32(tid);
         buf->putVar32(call_trace_id);
-        buf->putVar32(event->_class_id);
+        buf->putVar32(class_id);
         buf->put8(0);
         buf->putVar64(event->_address);
         buf->put8(start, buf->offset() - start);
     }
 
     void recordThreadPark(Buffer* buf, int tid, u32 call_trace_id, LockEvent* event) {
+        u32 class_id = event->classId();
         int start = buf->skip(1);
         buf->put8(T_THREAD_PARK);
         buf->putVar64(event->_start_time);
         buf->putVar64(event->_end_time - event->_start_time);
         buf->putVar32(tid);
         buf->putVar32(call_trace_id);
-        buf->putVar32(event->_class_id);
+        buf->putVar32(class_id);
         buf->putVar64(event->_timeout);
         buf->putVar64(MIN_JLONG);
         buf->putVar64(event->_address);
@@ -1224,12 +1265,22 @@ class Recording {
         buf->put8(start, buf->offset() - start);
     }
 
-    void recordWindow(Buffer* buf, int tid, ProfilingWindow* event) {
+    void recordWindow(Buffer* buf, int tid, SpanEvent* event) {
         int start = buf->skip(1);
         buf->put8(T_WINDOW);
         buf->putVar64(event->_start_time);
         buf->putVar64(event->_end_time - event->_start_time);
         buf->putVar32(tid);
+        buf->put8(start, buf->offset() - start);
+    }
+
+    void recordSpan(Buffer* buf, int tid, SpanEvent* event) {
+        int start = buf->skip(1);
+        buf->put8(T_SPAN);
+        buf->putVar64(event->_start_time);
+        buf->putVar64(event->_end_time - event->_start_time);
+        buf->putVar32(tid);
+        buf->putVar32(event->_tag == nullptr ? 0 : _string_pool.lookup(event->_tag));
         buf->put8(start, buf->offset() - start);
     }
 
@@ -1263,7 +1314,7 @@ class Recording {
     }
 
     void addThread(int tid) {
-        if (!_thread_set.accept(tid)) {
+        if (!_thread_set.contains(tid)) {
             _thread_set.add(tid);
         }
     }
@@ -1279,6 +1330,9 @@ Error FlightRecorder::start(Arguments& args, bool reset) {
     const char* filename = args.file();
     if (filename == NULL || filename[0] == 0) {
         return Error("Flight Recorder output file is not specified");
+    }
+    if (Arguments::isUrl(filename)) {
+        return Error("Flight Recorder requires a local file");
     }
 
     char* filename_tmp = NULL;
@@ -1308,6 +1362,9 @@ Error FlightRecorder::start(Arguments& args, bool reset) {
         free(filename_tmp);
     }
 
+    RateLimit::enable(args);
+    RecordingAPI::start();
+
     _rec = new Recording(fd, master_recording_file, args);
     _rec_lock.unlock();
     return Error::OK;
@@ -1316,6 +1373,9 @@ Error FlightRecorder::start(Arguments& args, bool reset) {
 void FlightRecorder::stop() {
     if (_rec != NULL) {
         _rec_lock.lock();
+
+        RecordingAPI::stop();
+        RateLimit::disable();
 
         if (_rec->hasMasterRecording()) {
             stopMasterRecording();
@@ -1349,6 +1409,8 @@ bool FlightRecorder::timerTick(u64 wall_time, u32 gc_id) {
         // No active recording
         return false;
     }
+
+    RateLimit::refill();
 
     _rec->cpuMonitorCycle();
     _rec->heapMonitorCycle(gc_id);
@@ -1407,8 +1469,7 @@ Error FlightRecorder::startMasterRecording(Arguments& args, const char* filename
     jobject jfilename = env->NewStringUTF(filename);
     jobject jsettings = args._jfr_sync == NULL ? NULL : env->NewStringUTF(args._jfr_sync);
 
-    int event_mask = args.eventMask() |
-                     ((args._jfr_options ^ JFR_SYNC_OPTS) << EVENT_MASK_SIZE);
+    int event_mask = args.eventMask() | (args._jfr_options ^ JFR_SYNC_OPTS) << EC_CATEGORIES;
 
     storeRelease(_jfr_starting, true);
     env->CallStaticVoidMethod(_jfr_sync_class, _start_method, jfilename, jsettings, event_mask);
@@ -1433,9 +1494,13 @@ void FlightRecorder::stopMasterRecording() {
 void FlightRecorder::recordEvent(int lock_index, int tid, u32 call_trace_id,
                                  EventType event_type, Event* event) {
     if (_rec != NULL) {
-        // Recording an event, increment the sample counter to allow
-        // user code to attach metadata.
-        ThreadLocalData::incrementSampleCounter();
+        // Update per-thread monotonic counter with the last event timestamp
+        if (event_type < PROFILING_WINDOW) {
+            asprof_thread_local_data* tld = ThreadLocalData::getIfPresent();
+            if (tld != nullptr && event->_start_time > tld->sample_counter) {
+                tld->sample_counter = event->_start_time;
+            }
+        }
 
         Buffer* buf = _rec->buffer(lock_index);
         switch (event_type) {
@@ -1475,11 +1540,16 @@ void FlightRecorder::recordEvent(int lock_index, int tid, u32 call_trace_id,
                 _rec->recordHardwareSample(buf, tid, call_trace_id, (HardwareEvent*)event);
                 break;
             case PROFILING_WINDOW:
-                _rec->recordWindow(buf, tid, (ProfilingWindow*)event);
+                _rec->recordWindow(buf, tid, (SpanEvent*)event);
+                break;
+            case SPAN:
+                _rec->recordSpan(buf, tid, (SpanEvent*)event);
                 break;
             case USER_EVENT:
                 _rec->recordUserEvent(buf, tid, (UserEvent*)event);
                 break;
+            default:
+                assert(false);  // should not reach here
         }
         _rec->flushIfNeeded(buf);
         _rec->addThread(tid);

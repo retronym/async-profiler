@@ -1,5 +1,71 @@
 # Changelog
 
+## [4.6]
+
+### Features
+
+ - #1775: Configurable rate limiter for JFR events
+ - #1777: Filter wall samples by thread name instead of thread id
+ - #1791: Send profiles directly to an OTel-compatible endpoint
+
+### Improvements
+
+ - #1780: Combine Flame Graph and Tree View in a single HTML
+ - #1781: More accurate stack walking limit
+ - #1782: Display actual value units in Flame Graph
+ - #1784: Add `service.name` resource attribute to OTLP output
+ - #1796: Support JFR event settings in `jfrsync`
+ - #1798: Fingerprint-based detection of idle threads during wall clock profiling
+ - #1800: Support tracking allocations of JEP 401 value classes
+ - #1805: Support regex matching for JFR span tag filters
+
+### Breaking changes
+
+ - #1776: Remove embedded HTTP server
+ - #1777: `filter` option no longer accepts arguments
+ - #1821: Update macos-version-min to 11
+
+### Bug fixes
+
+ - #1770: Fix `--tlab` mode on ARM64
+ - #1771: Fix glibc TLS corruption
+ - #1787: Fix stack walking edge cases on ARM64 and GraalVM
+ - #1792: Fix NullPointerException in `JfrConverter.excludeStack`
+ - #1806: jfrconv `--skip` option does not work for flame-to-flame conversion
+ - #1809: Fix use-after-free in `Dictionary::lookup`
+ - #1811: Recording API prevents the ClassLoader from being unloaded
+ - #1818: AsyncProfiler.getInstance() may deadlock due to JDK-8266310
+
+## [4.5] - 2026-07-20
+
+### Features
+
+ - #1755: Span API for latency profiling
+ - #1758: Parse DWARF unwinding info in the `.debug_frame` section
+ - #1768: Compatibility with OpenTelemetry Profiles Alpha
+
+### Improvements
+
+ - #1765: JDK 27 support
+ - #1737: Hot Code Heap support (JDK-8326205)
+ - #1739: Build jfr-converter as a GraalVM Native Image
+
+### Breaking changes
+
+ - #1768: `otlp` format has changed in accordance with opentelemetry-proto v1.10.0
+ - #1728: `AsyncProfiler.dumpOtlp()` now accepts `Counter` argument
+
+### Bug fixes
+
+ - #1406: Long time-to-safepoint pause when attaching asprof
+ - #1740: Re-register custom events on every JFR chunk
+ - #1746: Flush wall-clock events on dump or JFR chunk rotation
+ - #1749: Prefer non-real-time signals for profiling
+ - #1752: Heatmap visualization fixes
+ - #1756: Runtime attach fails on JVMs with many native libraries
+ - #1760: Async-profiler should choose the same clock for timestamps as JFR
+ - #1766: Method Tracing retransformed redundant classes
+
 ## [4.4] - 2026-04-20
 
 ### Features

@@ -26,52 +26,64 @@ enum EventType {
     LOCK_SAMPLE,
     PARK_SAMPLE,
     PROFILING_WINDOW,
+    SPAN,
     USER_EVENT,
     HW_SAMPLE,
+    EVENT_TYPES
 };
 
 class Event {
+  public:
+    u64 _start_time;
 };
 
-class EventWithClassId : public Event {
+class EventWithClass : public Event {
+  private:
+    const char* _class_name;
+    u32 _class_name_len;
+
   public:
-    u32 _class_id;
+    EventWithClass() : _class_name(nullptr) {}
+
+    void setClassName(const char* class_name, u32 len);
+    void setClassSignature(const char* class_sig);
+
+    // Must be called under the sample lock (Profiler::_locks).
+    // May allocate; do not call in asynchronous signal handlers.
+    // TODO: revisit this if Profiler::_class_map lifecycle changes.
+    u32 classId() const;
 };
 
 class ExecutionEvent : public Event {
   public:
-    u64 _start_time;
     ThreadState _thread_state;
 
-    ExecutionEvent(u64 start_time) : _start_time(start_time), _thread_state(THREAD_UNKNOWN) {}
+    ExecutionEvent(u64 start_time) {
+        _start_time = start_time;
+        _thread_state = THREAD_UNKNOWN;
+    }
 };
 
 class MethodTraceEvent : public Event {
   public:
-    u64 _start_time;
     u64 _duration;
-
-    MethodTraceEvent(u64 start_time, u64 duration) : _start_time(start_time), _duration(duration) {}
 };
 
 class WallClockEvent : public Event {
   public:
-    u64 _start_time;
     u64 _time_span;
     ThreadState _thread_state;
     u32 _samples;
 };
 
-class AllocEvent : public EventWithClassId {
+class AllocEvent : public EventWithClass {
   public:
-    u64 _start_time;
     u64 _total_size;
     u64 _instance_size;
 };
 
-class LockEvent : public EventWithClassId {
+class LockEvent : public EventWithClass {
   public:
-    u64 _start_time;
     u64 _end_time;
     uintptr_t _address;
     long long _timeout;
@@ -79,7 +91,6 @@ class LockEvent : public EventWithClassId {
 
 class NativeLockEvent : public Event {
   public:
-    u64 _start_time;
     u64 _end_time;
     uintptr_t _address;
 };
@@ -87,38 +98,36 @@ class NativeLockEvent : public Event {
 // Hardware counter sample (kperf on macOS): `_value` events of type `_name`
 class HardwareEvent : public Event {
   public:
-    u64 _start_time;
     const char* _name;
     u64 _value;
     bool _precise;
 
     HardwareEvent(u64 start_time, const char* name, u64 value, bool precise) :
-        _start_time(start_time), _name(name), _value(value), _precise(precise) {}
+        _name(name), _value(value), _precise(precise) {
+        _start_time = start_time;
+    }
 };
 
-class LiveObject : public EventWithClassId {
+class LiveObject : public EventWithClass {
   public:
-    u64 _start_time;
     u64 _alloc_size;
     u64 _alloc_time;
 };
 
-class ProfilingWindow : public Event {
-  public:
-    u64 _start_time;
-    u64 _end_time;
-};
-
 class MallocEvent : public Event {
   public:
-    u64 _start_time;
     uintptr_t _address;
     u64 _size;
 };
 
+class SpanEvent : public Event {
+  public:
+    u64 _end_time;
+    const char* _tag;
+};
+
 class UserEvent : public Event {
   public:
-    u64 _start_time;
     asprof_jfr_event_key _type;
     const uint8_t* _data;
     size_t _len;
