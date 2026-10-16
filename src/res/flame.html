@@ -191,7 +191,7 @@
 <div id='selbox'></div>
 <p id='status'></p>
 <div id='spanpanel'><div id='spanhead'><span id='spantitle'></span><select id='spangroup' title='Group the samples by'>
-<option value='innermost'>innermost span</option><option value='definition'>definition</option><option value='0'>outermost (phase)</option><option value='1'>level 2 (unit)</option><option value='2'>level 3 (class)</option></select></div><div id='spanrows'></div></div>
+<option value='chain'>definition, with owners</option><option value='definition'>definition</option><option value='innermost'>innermost span</option><option value='0'>outermost (phase)</option><option value='1'>level 2 (unit)</option><option value='2'>level 3 (class)</option></select></div><div id='spanrows'></div></div>
 <script>
 	// Copyright The async-profiler authors
 	// SPDX-License-Identifier: Apache-2.0
@@ -303,6 +303,11 @@
 	function spanKey(tag, by) {
 		const parts = tag.split(' > ');
 		if (by === 'innermost') return parts[parts.length - 1];
+		if (by === 'chain') {
+			// the definition with its enclosing classes and members: the path after phase and unit, without markers
+			const chain = parts.slice(2).filter(p => !SPAN_MARKERS.has(p));
+			return chain.length ? chain.join(' > ') : parts.slice(0, 2).join(' > ');
+		}
 		if (by === 'definition') {
 			for (let i = parts.length - 1; i >= 0; i--) if (!SPAN_MARKERS.has(parts[i])) return parts[i];
 			return parts[0];
