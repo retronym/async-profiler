@@ -45,7 +45,12 @@
 	.spannum {text-align: right; font-family: monospace}
 	.spanrow:hover .spanname {outline: 1px solid var(--hl-border)}
 	#spanhide {width: 18px; height: 18px; padding: 0; font-size: 13px; line-height: 1; color: var(--fg)}
+	#spanunpin {display: none; width: auto; height: 18px; padding: 0 3px; font-size: 11px; background: var(--hl-bg); outline: 1px solid var(--hl-border); border-radius: 4px}
+	#spanunpin.on {display: inline-block}
 	#spanhint {font-size: 10px; opacity: 0.6; margin-top: 4px}
+	#ctxmenu {position: fixed; z-index: 40; display: none; background: var(--legend-bg); color: var(--fg); border: 1px solid var(--legend-border); border-radius: 6px; box-shadow: 0 4px 16px rgba(0,0,0,0.3); padding: 3px; font-size: 12px; min-width: 200px; max-width: 480px}
+	#ctxmenu div {padding: 4px 10px; border-radius: 4px; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap}
+	#ctxmenu div:hover {background: var(--hl-bg); outline: 1px solid var(--hl-border)}
 	#spanbtn {width: auto; padding: 0 5px; font-size: 11px; color: var(--fg); display: none}
 	#spanbtn.active {background-color: var(--hl-bg); outline: 1px solid var(--hl-border); border-radius: 4px}
 	#toolbar::after {content: ''; display: table; clear: both}
@@ -198,7 +203,8 @@
 <div id='hl'><span></span></div>
 <div id='selbox'></div>
 <p id='status'></p>
-<div id='spanpanel'><div id='spanhead'><span id='spantitle'></span><input id='spanfilter' type='text' placeholder='filter' autocomplete='off' spellcheck='false' title='Show only the spans containing this text'><select id='spangroup' title='Group the samples by'></select><button id='spanhide' title='Hide the panel (the Spans button brings it back)'>&#x2013;</button></div><div id='spanrows'></div><div id='spanhint'>Click a span to keep only its samples (a filter; a path also keeps the spans nested in it); Shift+click to highlight it.</div></div>
+<div id='ctxmenu'></div>
+<div id='spanpanel'><div id='spanhead'><button id='spanunpin' title='Unpin: follow the hovered frame again'>&#x1F4CC;</button><span id='spantitle'></span><input id='spanfilter' type='text' placeholder='filter' autocomplete='off' spellcheck='false' title='Show only the spans containing this text'><select id='spangroup' title='Group the samples by'></select><button id='spanhide' title='Hide the panel (the Spans button brings it back)'>&#x2013;</button></div><div id='spanrows'></div><div id='spanhint'>Click a span to keep only its samples (a filter; a path also keeps the spans nested in it); Shift+click to highlight it.</div></div>
 <script>
 	// Copyright The async-profiler authors
 	// SPDX-License-Identifier: Apache-2.0
@@ -414,16 +420,7 @@
 
 	// A highlight chip for a span group: frames whose samples include it are coloured
 	function addSpanHighlight(by, key) {
-		const term = 'span: ' + key;
-		if (highlightChips.some(c => c.term === term)) return;
-		const chip = {term, pattern: /(?!)/, color: currentHighlightColor, span: {by, key}, frames: null, gen: -1};
-		highlightChips.push(chip);
-		openSearch();  // the highlight chips are in the search bar
-		const used = new Set(highlightChips.map(c => c.color));
-		currentHighlightColor = HIGHLIGHT_COLORS.find(c => !used.has(c)) || HIGHLIGHT_COLORS[0];
-		updateHighlightChips();
-		document.querySelectorAll('.color-swatch').forEach(sw => sw.classList.toggle('selected', sw.dataset.color === currentHighlightColor));
-		render(root);
+		addHighlight('span: ' + key, /(?!)/, {by, key});
 	}
 
 	// Bumped whenever the frames change (filters, removed stacks, restore, bottom-up, sort), for what is computed from them
@@ -451,8 +448,17 @@
 	document.getElementById('spanhide').onclick = () => { spanPanelOpen = false; setSpanPanelOpen(false); };
 	document.getElementById('spanbtn').onclick = () => { spanPanelOpen = !spanPanelOpen; setSpanPanelOpen(spanPanelOpen); if (spanPanelOpen) updateSpanPanel(currentFrame || root); };
 
-	// What the panel covers: a frame (hovered, or the zoom root), or the search's matches
+	// What the panel covers: a frame (hovered, pinned, or the zoom root), or the search's matches
 	let spanPanelTarget = null, spanPanelPending = false;
+	let spanPinned = null, spanPinnedGen = -1;
+	function pinSpanPanel(fr) {
+		spanPinned = fr;
+		spanPinnedGen = levelsGen;
+		document.getElementById('spanunpin').classList.toggle('on', !!fr);
+		if (fr && !spanPanelOpen) { spanPanelOpen = true; setSpanPanelOpen(true); }
+		if (fr) updateSpanPanel(fr);
+	}
+	document.getElementById('spanunpin').onclick = () => { pinSpanPanel(null); updateSpanPanel(currentFrame || root); };
 	let spanButtonShown = false;
 	function updateSpanPanel(fr) {
 		if (!hasSpans || !fr) return;
@@ -463,6 +469,8 @@
 			setSpanPanelOpen(spanPanelOpen);
 		}
 		if (!spanPanelOpen) return;
+		if (spanPinned && spanPinnedGen !== levelsGen) pinSpanPanel(null);  // the frame is gone
+		if (spanPinned) fr = spanPinned;
 		spanPanelTarget = fr === root && pattern && nav && nav.length ? {matches: nav} : fr;
 		if (spanPanelPending) return;
 		spanPanelPending = true;
@@ -648,8 +656,8 @@
 	}
 
 	// ── Filters ─────────────────────────────────────────────────────────────────
-	// The filters applied to the frames, in order: a search ({pattern, under: the path of the zoom root, if any}), a
-	// span group ({by, key}) or a removed stack ({path}). Removing one replays the others on the unfiltered frames,
+	// The filters applied to the frames, in order: a search ({pattern, under: the path of the zoom root, if any}),
+	// hiding the stacks through matching frames ({pattern}), a span group ({by, key}) or a removed stack ({path}). Removing one replays the others on the unfiltered frames,
 	// so they refer to frames by their path rather than by position.
 	let filters = [];
 
@@ -663,6 +671,10 @@
 		if (flt.kind === 'search') {
 			const under = flt.under ? frameAtPath(flt.under) : levels[0][0];
 			if (under) filterMatches(matchedFrames(flt.pattern, under));
+		} else if (flt.kind === 'hide') {
+			// right to left, so that the matches to the left stay where they are
+			const matches = matchedFrames(flt.pattern, levels[0][0]);
+			for (let i = matches.length - 1; i >= 0; i--) if (matches[i].level > 0) removeStack(matches[i].left, matches[i].width);
 		} else if (flt.kind === 'span') {
 			filterSpans(flt.by, flt.key);
 		} else {
@@ -926,15 +938,22 @@
 		try {
 			pat = RegExp(useRegex ? term : term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), caseSensitive ? '' : 'i');
 		} catch(e) { return; }
-		highlightChips.push({term: term, pattern: pat, color: currentHighlightColor});
-		const used = new Set(highlightChips.map(function(c) { return c.color; }));
-		currentHighlightColor = HIGHLIGHT_COLORS.find(function(c) { return !used.has(c); }) || HIGHLIGHT_COLORS[0];
-		updateHighlightChips();
-		document.querySelectorAll('.color-swatch').forEach(function(s) {
-			s.classList.toggle('selected', s.dataset.color === currentHighlightColor);
-		});
+		addHighlight(term, pat);
 		document.getElementById('searchinput').value = '';
 		search('');
+	}
+
+	// A highlight chip for frames matching `pat`, or for those with samples in a span group (`span`: {by, key})
+	function addHighlight(term, pat, span) {
+		if (highlightChips.some(c => c.term === term)) return;
+		highlightChips.push({term, pattern: pat, color: currentHighlightColor, span, frames: null, gen: -1});
+		const used = new Set(highlightChips.map(c => c.color));
+		currentHighlightColor = HIGHLIGHT_COLORS.find(c => !used.has(c)) || HIGHLIGHT_COLORS[0];
+		updateHighlightChips();
+		document.getElementById('searchbar').classList.add('open');  // the highlight chips are in the search bar
+		document.getElementById('search').classList.add('active');
+		document.querySelectorAll('.color-swatch').forEach(sw => sw.classList.toggle('selected', sw.dataset.color === currentHighlightColor));
+		render(root);
 	}
 
 	function buildColorPicker() {
@@ -1060,12 +1079,7 @@
 				updateSpanPanel(f);
 				canvas.onclick = function() {
 					if ((event.altKey || event.ctrlKey) && h >= root.level && h > 0) {
-						filters.push({kind: 'remove', label: '\u2212 ' + displayName(f.title), path: framePath(f)});
-						removeStack(f.left, f.width);
-						stacksRemoved = true;
-						document.getElementById('restoreBtn').disabled = false;
-						updateFilterChips();
-						root.width > f.width ? render(root) : render();
+						hideStack(f);
 					} else if (f !== root) {
 						render(f);
 					}
@@ -1078,6 +1092,56 @@
 		}
 		canvas.onmouseout();
 	}
+
+	// Removes the stack of `f`, keeping the zoom unless the root goes too
+	function hideStack(f) {
+		filters.push({kind: 'remove', label: '\u2212 ' + displayName(f.title), path: framePath(f)});
+		removeStack(f.left, f.width);
+		stacksRemoved = true;
+		document.getElementById('restoreBtn').disabled = false;
+		updateFilterChips();
+		root.width > f.width ? render(root) : render();
+	}
+
+	// ── Context menu ──────────────────────────────────────────────────────────────
+	const ctxmenu = document.getElementById('ctxmenu');
+	function closeMenu() { ctxmenu.style.display = 'none'; }
+	addEventListener('mousedown', e => { if (!ctxmenu.contains(e.target)) closeMenu(); }, true);
+	addEventListener('blur', closeMenu);
+
+	canvas.oncontextmenu = function(e) {
+		const h = Math.floor((inverted ? e.offsetY : (canvasHeight - e.offsetY)) / 16);
+		const f = h >= 0 && h < levels.length ? findFrame(levels[h], e.offsetX / px + x0Rendered) : null;
+		if (!f) return;
+		e.preventDefault();
+		const name = displayName(f.title), isFrame = f.level > 0;
+		const exact = RegExp('^' + f.title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$');
+		const items = [
+			['Zoom to this frame', f !== root, () => render(f)],
+			['Keep only stacks through ' + name, isFrame, () => addFilter({kind: 'search', label: 'only ' + name, pattern: exact, under: null})],
+			['Hide stacks through ' + name, isFrame, () => addFilter({kind: 'hide', label: 'not ' + name, pattern: exact})],
+			['Hide this stack', isFrame && f.level >= root.level, () => hideStack(f)],
+			['Highlight ' + name, isFrame, () => addHighlight(f.title, exact)],
+			['Search for ' + name, isFrame, () => {
+				openSearch();
+				const inp = document.getElementById('searchinput');
+				inp.value = useRegex ? exact.source.slice(1, -1) : f.title;
+				search(inp.value);
+			}],
+			['Pin the span panel to this frame', hasSpans, () => pinSpanPanel(f)],
+			['Copy frame name', true, () => navigator.clipboard && navigator.clipboard.writeText(f.title)],
+		].filter(x => x[1]);
+		ctxmenu.textContent = '';
+		for (const [label, , action] of items) {
+			const item = document.createElement('div');
+			item.textContent = label;
+			item.onclick = () => { closeMenu(); action(); canvas.onmouseout(); };
+			ctxmenu.appendChild(item);
+		}
+		ctxmenu.style.display = 'block';
+		ctxmenu.style.left = Math.max(0, Math.min(e.clientX, innerWidth - ctxmenu.offsetWidth - 4)) + 'px';
+		ctxmenu.style.top = Math.max(0, Math.min(e.clientY, innerHeight - ctxmenu.offsetHeight - 4)) + 'px';
+	};
 
 	canvas.onmouseout = function() {
 		if (root) updateSpanPanel(root);
@@ -1312,6 +1376,7 @@
 			openSearch();
 			return false;
 		} else if (event.key === 'Escape') {
+			closeMenu();
 			closeSearch();
 		} else if ((event.key === 'n' || event.key === 'N') && nav.length > 0) {
 			navIndex = (navIndex + (event.shiftKey ? nav.length - 1 : 1)) % nav.length;
