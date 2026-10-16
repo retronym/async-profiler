@@ -345,6 +345,9 @@
 	//   {"markers": [...], "groups": [{"label": ..., "by": ..., ...}, ...]}
 	const spanConfig = /*spanconfig:*/null || {};
 	const SPAN_MARKERS = new Set(spanConfig.markers || []);
+	// Spans that are a cost of their own wherever they happen (e.g. a shared table's growth): grouped under their own
+	// name, not their enclosing spans', in every grouping
+	const SPAN_STANDALONE = new Set(spanConfig.standalone || []);
 	let spanGroups = null;  // the groupings, built on first use; a grouping is referred to by its index
 	function initSpanGroups() {
 		if (spanConfig.groups) return spanGroups = spanConfig.groups;
@@ -367,6 +370,8 @@
 	}
 	function spanKey(tag, g) {
 		const parts = tag.split(' > ');
+		const last = parts[parts.length - 1];
+		if (SPAN_STANDALONE.has(last)) return last;
 		const named = p => !g.skipMarkers || !SPAN_MARKERS.has(p);
 		if (g.by === 'innermost') {
 			for (let i = parts.length - 1; i >= 0; i--) if (named(parts[i])) return parts[i];
