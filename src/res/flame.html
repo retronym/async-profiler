@@ -31,18 +31,33 @@
 	#status {left: 0}
 	#toolbar {position: sticky; top: 0; z-index: 10; background: var(--bg)}
 	/* Span panel (--spans): where the samples under the hovered frame were taken, by span tag */
-	#spanpanel {position: fixed; right: 12px; bottom: 28px; z-index: 20; width: 460px; max-height: 60vh; overflow: auto; display: none; background: var(--legend-bg); border: 1px solid var(--legend-border); border-radius: 4px; padding: 6px 8px; font-size: 11px; box-shadow: 0 2px 8px rgba(0,0,0,0.2)}
+	#spanpanel {position: fixed; right: 12px; bottom: 28px; z-index: 20; width: 560px; max-height: 60vh; overflow: auto; display: none; background: var(--legend-bg); border: 1px solid var(--legend-border); border-radius: 4px; padding: 6px 8px; font-size: 11px; box-shadow: 0 2px 8px rgba(0,0,0,0.2)}
 	#spanpanel.open {display: block}
 	#spanhead {display: flex; gap: 6px; align-items: baseline; margin-bottom: 4px}
 	#spantitle {flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: bold}
 	#spangroup {font: 11px Verdana, sans-serif; background: var(--bg); color: var(--fg); border: 1px solid var(--legend-border)}
-	.spanrow {display: grid; grid-template-columns: 1fr 52px 40px; gap: 4px; align-items: center; padding: 1px 0}
+	.spanrow {display: grid; grid-template-columns: 1fr 50px 40px 40px 40px; gap: 4px; align-items: center; padding: 1px 0}
+	.spanheadrow {font-size: 10px; opacity: 0.6; cursor: default}
+	.spanheadrow .spannum {font-family: inherit}
+	#spanfilter {width: 90px; font: 11px Verdana, sans-serif; background: var(--bg); color: var(--fg); border: 1px solid var(--legend-border); padding: 0 3px}
 	.spanname {position: relative; z-index: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 1px 3px; cursor: pointer}
 	.spanbar {position: absolute; left: 0; top: 0; bottom: 0; background: #e17d00; opacity: 0.35; z-index: -1}
 	.spannum {text-align: right; font-family: monospace}
 	.spanrow:hover .spanname {outline: 1px solid var(--hl-border)}
 	#spanhide {width: 18px; height: 18px; padding: 0; font-size: 13px; line-height: 1; color: var(--fg)}
+	#spanunpin {display: none; width: auto; height: 18px; padding: 0 3px; font-size: 11px; background: var(--hl-bg); outline: 1px solid var(--hl-border); border-radius: 4px}
+	#spanunpin.on {display: inline-block}
+	#spanfilts {display: none; flex-wrap: wrap; gap: 4px; align-items: center; margin-bottom: 4px; padding-bottom: 4px; border-bottom: 1px solid var(--legend-border)}
+	#spanfilts.visible {display: flex}
+	.spanclear {width: auto; height: 18px; padding: 0 6px; font-size: 10px; color: var(--fg); border: 1px solid var(--hl-border); border-radius: 9px}
+	.spanrow.active .spanname {outline: 1px solid var(--hl-border); font-weight: bold}
+	#spanhistwrap {display: flex; gap: 6px; align-items: center; margin-bottom: 3px}
+	#spanhist {flex: 1; min-width: 0; height: 36px; cursor: pointer}
+	#spanhistlabel {font-size: 10px; opacity: 0.7; white-space: pre; text-align: right}
 	#spanhint {font-size: 10px; opacity: 0.6; margin-top: 4px}
+	#ctxmenu {position: fixed; z-index: 40; display: none; background: var(--legend-bg); color: var(--fg); border: 1px solid var(--legend-border); border-radius: 6px; box-shadow: 0 4px 16px rgba(0,0,0,0.3); padding: 3px; font-size: 12px; min-width: 200px; max-width: 480px}
+	#ctxmenu div {padding: 4px 10px; border-radius: 4px; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap}
+	#ctxmenu div:hover {background: var(--hl-bg); outline: 1px solid var(--hl-border)}
 	#spanbtn {width: auto; padding: 0 5px; font-size: 11px; color: var(--fg); display: none}
 	#spanbtn.active {background-color: var(--hl-bg); outline: 1px solid var(--hl-border); border-radius: 4px}
 	#toolbar::after {content: ''; display: table; clear: both}
@@ -86,7 +101,7 @@
 	/* Highlight and filter chips */
 	.hl-dot {width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex-shrink: 0}
 	.hl-chip {font-size: 11px; padding: 1px 3px 1px 5px; border: 1px solid; border-radius: 10px; white-space: nowrap; color: var(--fg); display: inline-flex; align-items: center; gap: 3px}
-	.filt-chip {font-size: 11px; padding: 1px 6px; background: var(--hl-bg); border: 1px solid var(--hl-border); border-radius: 10px; white-space: nowrap; color: var(--fg); cursor: default}
+	.filt-chip {font-size: 11px; padding: 1px 6px; background: var(--hl-bg); border: 1px solid var(--hl-border); border-radius: 10px; white-space: nowrap; color: var(--fg); cursor: default; display: inline-flex; align-items: center; gap: 3px}
 	.filt-chip-and {font-size: 10px; opacity: 0.5; font-style: italic; padding: 0 1px}
 	.chip-x {width: 14px; height: 14px; font-size: 11px; padding: 0; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; color: var(--fg); opacity: 0.55; line-height: 1}
 	.chip-x:hover {opacity: 1; background: rgba(128,128,128,0.25); outline: none}
@@ -195,8 +210,8 @@
 <div id='hl'><span></span></div>
 <div id='selbox'></div>
 <p id='status'></p>
-<div id='spanpanel'><div id='spanhead'><span id='spantitle'></span><select id='spangroup' title='Group the samples by'>
-<option value='chain'>definition, with owners</option><option value='definition'>definition</option><option value='innermost'>innermost span</option><option value='0'>outermost (phase)</option><option value='1'>level 2 (unit)</option><option value='2'>level 3 (class)</option></select><button id='spanhide' title='Hide the panel (the Spans button brings it back)'>&#x2013;</button></div><div id='spanrows'></div><div id='spanhint'>Click a span to keep only its samples (a filter, with nested spans for &ldquo;definition, with owners&rdquo;); Shift+click to highlight it.</div></div>
+<div id='ctxmenu'></div>
+<div id='spanpanel'><div id='spanhead'><button id='spanunpin' title='Unpin: follow the hovered frame again'>&#x1F4CC;</button><span id='spantitle'></span><input id='spanfilter' type='text' placeholder='filter' autocomplete='off' spellcheck='false' title='Show only the spans containing this text'><select id='spangroup' title='Group the samples by'></select><button id='spanhide' title='Hide the panel (the Spans button brings it back)'>&#x2013;</button></div><div id='spanfilts' title='The filters applied'></div><div id='spanhistwrap'><canvas id='spanhist' height='36'></canvas><span id='spanhistlabel'></span></div><div id='spanrows'></div><div id='spanhint'>Click a span to keep only its samples (a filter; a path also keeps the spans nested in it), click it again to undo; Shift+click to highlight it.</div></div>
 <script>
 	// Copyright The async-profiler authors
 	// SPDX-License-Identifier: Apache-2.0
@@ -302,32 +317,50 @@
 
 	// ── Span panel ──────────────────────────────────────────────────────────────
 	// The span leaf of a sample is the path of spans enclosing it, outermost first, ' > ' separated
-	// (e.g. 'typer > Foo.scala > Foo > bar > implicit'): group by its innermost or outermost span, by a level, or by
-	// definition (the innermost span that is not a constant marker such as 'implicit' or 'inline').
-	const SPAN_MARKERS = new Set(['implicit', 'inline']);
+	// (e.g. 'typer > Foo.scala > Foo > bar > implicit'). The panel groups the samples by a grouping:
+	//   {by: 'innermost'}           the innermost span
+	//   {by: 'level', level: N}     the span at level N (0: the outermost)
+	//   {by: 'path', from: N}       the path from level N on; a path's group also holds the paths nested in it
+	// with a `label`, and `skipMarkers: true` to pass over the marker spans (constant spans, such as a kind of work,
+	// rather than names). The converter can name the groupings and markers for its spans (--span-config):
+	//   {"markers": [...], "groups": [{"label": ..., "by": ..., ...}, ...]}
+	const spanConfig = /*spanconfig:*/null || {};
+	const SPAN_MARKERS = new Set(spanConfig.markers || []);
+	let spanGroups = null;  // the groupings, built on first use; a grouping is referred to by its index
+	function initSpanGroups() {
+		if (spanConfig.groups) return spanGroups = spanConfig.groups;
+		let depth = 1;
+		const seen = new Set();
+		for (const lv of levels) for (const fr of lv) if (fr.spans) for (let j = 0; j < fr.spans.length; j += 2) {
+			if (!seen.has(fr.spans[j])) { seen.add(fr.spans[j]); depth = Math.max(depth, cpool[fr.spans[j]].split(' > ').length); }
+		}
+		spanGroups = [{label: 'innermost span', by: 'innermost'}, {label: 'outermost span', by: 'level', level: 0}];
+		for (let i = 1; i < Math.min(depth, 8); i++) spanGroups.push({label: 'level ' + (i + 1), by: 'level', level: i});
+		spanGroups.push({label: 'full path', by: 'path', from: 0});
+		return spanGroups;
+	}
+
 	const spanKeys = {};  // grouping -> cpool index -> key
 	function spanKeyOf(idx, by) {
 		const keys = spanKeys[by] || (spanKeys[by] = []);
 		const k = keys[idx];
-		return k !== undefined ? k : (keys[idx] = spanKey(cpool[idx], by));
+		return k !== undefined ? k : (keys[idx] = spanKey(cpool[idx], spanGroups[by]));
 	}
-	function spanKey(tag, by) {
+	function spanKey(tag, g) {
 		const parts = tag.split(' > ');
-		if (by === 'innermost') return parts[parts.length - 1];
-		if (by === 'chain') {
-			// the definition with its enclosing classes and members: the path after phase and unit, without markers
-			const chain = parts.slice(2).filter(p => !SPAN_MARKERS.has(p));
-			return chain.length ? chain.join(' > ') : parts.slice(0, 2).join(' > ');
-		}
-		if (by === 'definition') {
-			for (let i = parts.length - 1; i >= 0; i--) if (!SPAN_MARKERS.has(parts[i])) return parts[i];
+		const named = p => !g.skipMarkers || !SPAN_MARKERS.has(p);
+		if (g.by === 'innermost') {
+			for (let i = parts.length - 1; i >= 0; i--) if (named(parts[i])) return parts[i];
 			return parts[0];
 		}
-		const level = +by;
-		return level < parts.length ? parts[level] : '(none)';
+		if (g.by === 'path') {
+			const from = g.from || 0, path = parts.slice(from).filter(named);
+			return path.length ? path.join(' > ') : parts.slice(0, from).join(' > ');
+		}
+		return g.level < parts.length ? parts[g.level] : '(none)';
 	}
 
-	// Whether the span path at cpool index `idx` belongs to the group `key` under grouping `by`; with owners, nested
+	// Whether the span path at cpool index `idx` belongs to the group `key` under grouping `by`; for a path, nested
 	// spans belong too. Memoized for the last (by, key).
 	let spanMatchFor = null, spanMatchMemo = [];
 	function spanMatches(idx, by, key) {
@@ -335,7 +368,7 @@
 		const m = spanMatchMemo[idx];
 		if (m !== undefined) return m;
 		const k = spanKeyOf(idx, by);
-		return spanMatchMemo[idx] = k === key || (by === 'chain' && k.startsWith(key + ' > '));
+		return spanMatchMemo[idx] = k === key || (spanGroups[by].by === 'path' && k.startsWith(key + ' > '));
 	}
 
 	// Per frame: the samples of its own spans that match, and of its subtree (frames are matched to parents by
@@ -364,6 +397,11 @@
 	// Keep only the samples taken in matching spans: each frame's width becomes its matching samples, laid out in
 	// the same order (own spans first, as the converter lays out span leaves before a frame's children)
 	function keepOnlySpans(by, key) {
+		addFilter({kind: 'span', label: 'span: ' + shortSpanPath(key), title: 'span: ' + key, by, key});
+		openSearch();  // the filter chips are in the search bar
+	}
+
+	function filterSpans(by, key) {
 		const {own, sub, parentOf} = spanMatchCounts(by, key);
 		const next = new Map();  // original frame -> left of its next child in the filtered layout
 		const out = levels.map(() => []);
@@ -385,27 +423,11 @@
 		}
 		for (let h = 0; h < levels.length; h++) levels[h] = out[h];
 		levelsChanged();
-		filterHistory.push('span: ' + key);
-		updateFilterChips();
-		openSearch();  // the filter chips are in the search bar
-		stacksRemoved = true;
-		document.getElementById('restoreBtn').disabled = false;
-		zoomFactor = 1; panSamples = 0;
-		render(levels[0][0]);
 	}
 
 	// A highlight chip for a span group: frames whose samples include it are coloured
 	function addSpanHighlight(by, key) {
-		const term = 'span: ' + key;
-		if (highlightChips.some(c => c.term === term)) return;
-		const chip = {term, pattern: /(?!)/, color: currentHighlightColor, span: {by, key}, frames: null, gen: -1};
-		highlightChips.push(chip);
-		openSearch();  // the highlight chips are in the search bar
-		const used = new Set(highlightChips.map(c => c.color));
-		currentHighlightColor = HIGHLIGHT_COLORS.find(c => !used.has(c)) || HIGHLIGHT_COLORS[0];
-		updateHighlightChips();
-		document.querySelectorAll('.color-swatch').forEach(sw => sw.classList.toggle('selected', sw.dataset.color === currentHighlightColor));
-		render(root);
+		addHighlight('span: ' + key, /(?!)/, {by, key}, 'span: ' + shortSpanPath(key));
 	}
 
 	// Bumped whenever the frames change (filters, removed stacks, restore, bottom-up, sort), for what is computed from them
@@ -433,17 +455,29 @@
 	document.getElementById('spanhide').onclick = () => { spanPanelOpen = false; setSpanPanelOpen(false); };
 	document.getElementById('spanbtn').onclick = () => { spanPanelOpen = !spanPanelOpen; setSpanPanelOpen(spanPanelOpen); if (spanPanelOpen) updateSpanPanel(currentFrame || root); };
 
-	// What the panel covers: a frame (hovered, or the zoom root), or the search's matches
+	// What the panel covers: a frame (hovered, pinned, or the zoom root), or the search's matches
 	let spanPanelTarget = null, spanPanelPending = false;
+	let spanPinned = null, spanPinnedGen = -1;
+	function pinSpanPanel(fr) {
+		spanPinned = fr;
+		spanPinnedGen = levelsGen;
+		document.getElementById('spanunpin').classList.toggle('on', !!fr);
+		if (fr && !spanPanelOpen) { spanPanelOpen = true; setSpanPanelOpen(true); }
+		if (fr) updateSpanPanel(fr);
+	}
+	document.getElementById('spanunpin').onclick = () => { pinSpanPanel(null); updateSpanPanel(currentFrame || root); };
 	let spanButtonShown = false;
 	function updateSpanPanel(fr) {
 		if (!hasSpans || !fr) return;
 		if (!spanButtonShown) {
 			spanButtonShown = true;
 			document.getElementById('spanbtn').style.display = 'inline-block';
+			initSpanGroupSelect();
 			setSpanPanelOpen(spanPanelOpen);
 		}
 		if (!spanPanelOpen) return;
+		if (spanPinned && spanPinnedGen !== levelsGen) pinSpanPanel(null);  // the frame is gone
+		if (spanPinned) fr = spanPinned;
 		spanPanelTarget = fr === root && pattern && nav && nav.length ? {matches: nav} : fr;
 		if (spanPanelPending) return;
 		spanPanelPending = true;
@@ -456,12 +490,81 @@
 		let sum = 0;
 		const frames = target.matches || [target];
 		for (const fr of frames) sum += addSpans(fr, by, totals);
-		const top = [...totals.entries()].sort((x, y) => y[1] - x[1]).slice(0, 25);
-		const max = top.length ? top[0][1] : 1;
+		const text = document.getElementById('spanfilter').value.toLowerCase();
+		const all = [...totals.entries()].filter(([k]) => !text || k.toLowerCase().includes(text)).sort((x, y) => y[1] - x[1]);
+		const top = all.slice(0, 25);
 		const what = target.matches ? 'search \u201c' + document.getElementById('searchinput').value + '\u201d (' + frames.length + ' matches)' : displayName(target.title);
-		document.getElementById('spantitle').textContent = what + ' \u2014 ' + samples(sum) + ' in ' + totals.size + ' spans';
+		document.getElementById('spantitle').textContent = what + ' \u2014 ' + samples(sum) + ' in ' + totals.size + ' spans' +
+			(text ? ', ' + all.length + ' shown' : '');
 		document.getElementById('spantitle').title = target.matches ? pattern.source : target.title;
-		drawSpanRows(top, max, sum);
+		drawSpanHistogram(all, sum, top.length);
+		drawSpanRows(top, sum);
+	}
+
+	// Every group's samples, heaviest first (the rows are the first `shown`), with their cumulative share: how
+	// concentrated the samples are, including the tail the list leaves out
+	let spanHistGroups = [], spanHistLog = false;
+	function drawSpanHistogram(groups, sum, shown) {
+		const cv = document.getElementById('spanhist'), dpr = devicePixelRatio || 1;
+		document.getElementById('spanhistwrap').style.display = '';
+		const w = cv.clientWidth, h = 36;
+		cv.width = w * dpr; cv.height = h * dpr;
+		const g = cv.getContext('2d');
+		g.scale(dpr, dpr);
+		spanHistGroups = groups;
+		// only worth showing for a tail beyond the rows
+		document.getElementById('spanhistwrap').style.display = groups.length > shown ? '' : 'none';
+		if (groups.length <= shown || !w) return;
+		const n = groups.length, max = groups[0][1], fg = getComputedStyle(document.documentElement).getPropertyValue('--fg');
+		// a long tail on a log scale, so that the heavy groups stay visible
+		spanHistLog = n > w / 4;
+		const pos = i => spanHistLog ? w * Math.log1p(i) / Math.log1p(n) : w * i / n;
+		let cum = 0, shownSum = 0;
+		g.fillStyle = '#e17d00';
+		for (let i = 0; i < n; i++) {
+			const v = groups[i][1], bh = Math.max(1, (h - 2) * v / max), x0 = pos(i), bw = pos(i + 1) - x0;
+			g.globalAlpha = i < shown ? 0.75 : 0.35;
+			g.fillRect(x0, h - bh, Math.max(bw - (bw > 3 ? 1 : 0), 0.5), bh);
+			if (i < shown) shownSum += v;
+		}
+		g.globalAlpha = 1;
+		g.strokeStyle = fg;
+		g.lineWidth = 1;
+		g.beginPath();
+		g.moveTo(0, h);
+		for (let i = 0; i < groups.length; i++) {
+			cum += groups[i][1];
+			g.lineTo(pos(i + 1), h - (h - 2) * cum / (sum || 1));
+		}
+		g.stroke();
+		document.getElementById('spanhistlabel').textContent = groups.length + ' groups\nlisted: ' + (100 * shownSum / (sum || 1)).toFixed(0) + '%';
+	}
+	function spanHistAt(e) {
+		const cv = document.getElementById('spanhist');
+		const n = spanHistGroups.length, f = e.offsetX / cv.clientWidth;
+		return spanHistGroups[Math.floor(spanHistLog ? Math.expm1(f * Math.log1p(n)) : f * n)];
+	}
+	document.getElementById('spanhist').onmousemove = function(e) {
+		const grp = spanHistAt(e);
+		this.title = grp ? grp[0] + '\n' + samples(grp[1]) + (spanHistLog ? '\n(groups on a log scale)' : '') + '\nClick: keep only these samples. Shift+click: highlight' : '';
+	};
+	document.getElementById('spanhist').onclick = function(e) {
+		const grp = spanHistAt(e), by = document.getElementById('spangroup').value;
+		if (grp) e.shiftKey ? addSpanHighlight(by, grp[0]) : keepOnlySpans(by, grp[0]);
+	};
+
+	// A long span shortened for the list: a {...} list to its first item, a file path to its last two names,
+	// anything else to its ends
+	function shortSpan(s) {
+		const brace = s.indexOf('{');
+		if (brace > 0 && s.endsWith('}') && s.indexOf(',', brace) > 0) s = s.substring(0, s.indexOf(',', brace)) + '\u2026}';
+		if (s.length <= 48) return s;
+		const names = s.split('/');
+		if (names.length > 2) s = '\u2026/' + names.slice(-2).join('/');
+		return s.length <= 48 ? s : s.substring(0, 30) + '\u2026' + s.substring(s.length - 17);
+	}
+	function shortSpanPath(path) {
+		return path.split(' > ').map(shortSpan).join(' > ');
 	}
 
 	// Adds the span samples under `fr` to `totals`, keyed by spanKey; returns their sum
@@ -486,37 +589,73 @@
 		return sum;
 	}
 
-	function drawSpanRows(top, max, sum) {
+	// Each row: the group, its samples, and their share of the samples listed, of the current root (zoomed into or
+	// filtered) and of the whole profile
+	function drawSpanRows(top, sum) {
 		const rows = document.getElementById('spanrows');
 		rows.textContent = '';
+		const max = top.length ? top[0][1] : 1, all = originalLevels[0][0].width;
+		const cell = (text, title) => {
+			const c = document.createElement('span');
+			c.className = 'spannum';
+			c.textContent = text;
+			if (title) c.title = title;
+			return c;
+		};
+		const head = document.createElement('div');
+		head.className = 'spanrow spanheadrow';
+		head.append(cell(''), cell('samples'), cell('here', 'Share of the samples listed'),
+			cell('root', 'Share of the current root (zoomed into or filtered): ' + samples(root.width)),
+			cell('total', 'Share of the whole profile: ' + samples(all)));
+		rows.appendChild(head);
+		const share = (v, of) => (100 * v / (of || 1)).toFixed(1) + '%';
 		for (const [k, v] of top) {
 			const row = document.createElement('div');
 			row.className = 'spanrow';
 			const name = document.createElement('span');
 			name.className = 'spanname';
-			name.title = k;
 			const bar = document.createElement('span');
 			bar.className = 'spanbar';
 			bar.style.width = (100 * v / max) + '%';
 			name.appendChild(bar);
-			name.appendChild(document.createTextNode(k));
-			const n = document.createElement('span');
-			n.className = 'spannum';
-			n.textContent = v.toLocaleString();
-			const p = document.createElement('span');
-			p.className = 'spannum';
-			p.textContent = (100 * v / (sum || 1)).toFixed(1) + '%';
-			row.append(name, n, p);
-			row.title = 'Click: keep only these samples. Shift+click: highlight';
+			name.appendChild(document.createTextNode(shortSpanPath(k)));
+			row.append(name, cell(v.toLocaleString()), cell(share(v, sum)), cell(share(v, root.width)), cell(share(v, all)));
+			row.title = k + '\n' + samples(v) + ': ' + share(v, sum) + ' of these, ' + share(v, root.width) + ' of the root, ' +
+				share(v, all) + ' of the profile\nClick: keep only these samples. Shift+click: highlight';
+			// a group already filtered on: marked, and a click removes that filter
+			const by = document.getElementById('spangroup').value;
+			const active = filters.findIndex(f => f.kind === 'span' && f.by === by && f.key === k);
+			if (active >= 0) {
+				row.classList.add('active');
+				row.title = k + '\nFiltered on: click to remove this filter';
+			}
 			row.onclick = (e) => {
-				const by = document.getElementById('spangroup').value;
-				if (e.shiftKey) addSpanHighlight(by, k); else keepOnlySpans(by, k);
+				const i = filters.findIndex(f => f.kind === 'span' && f.by === by && f.key === k);
+				if (e.shiftKey) addSpanHighlight(by, k); else if (i >= 0) removeFilter(i); else keepOnlySpans(by, k);
 			};
 			rows.appendChild(row);
 		}
 	}
 
-	document.getElementById('spangroup').onchange = () => drawSpanPanel(spanPanelTarget || root);
+	// The grouping is remembered by its label
+	function initSpanGroupSelect() {
+		const select = document.getElementById('spangroup');
+		let saved = null;
+		try { saved = localStorage.getItem('flame-spangroup'); } catch (ignored) {}
+		initSpanGroups().forEach((g, i) => {
+			const o = document.createElement('option');
+			o.value = i;
+			o.textContent = g.label;
+			o.selected = g.label === saved;
+			select.appendChild(o);
+		});
+	}
+	document.getElementById('spangroup').onchange = function() {
+		try { localStorage.setItem('flame-spangroup', spanGroups[this.value].label); } catch (ignored) {}
+		drawSpanPanel(spanPanelTarget || root);
+	};
+	document.getElementById('spanfilter').oninput = () => drawSpanPanel(spanPanelTarget || root);
+	document.getElementById('spanfilter').onkeydown = (e) => e.stopPropagation();  // not the page's shortcuts
 
 	function samples(n) {
 		return n === 1 ? '1 sample' : n.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',') + ' samples';
@@ -564,8 +703,6 @@
 			levels[h] = newFrames;
 		}
 		levelsChanged();
-		stacksRemoved = true;
-		document.getElementById('restoreBtn').disabled = false;
 	}
 
 	function updateZoomDisplay() {
@@ -592,11 +729,102 @@
 		render(root);
 	}
 
-	function keepOnlyMatched(term) {
-		if (!nav || nav.length === 0) return;
-		if (term) { filterHistory.push(term); updateFilterChips(); }
+	// ── Filters ─────────────────────────────────────────────────────────────────
+	// The filters applied to the frames, in order: a search ({pattern, under: the path of the zoom root, if any}),
+	// hiding the stacks through matching frames ({pattern}), a span group ({by, key}) or a removed stack ({path}). Removing one replays the others on the unfiltered frames,
+	// so they refer to frames by their path rather than by position.
+	let filters = [];
+
+	// What makes two filters the same, so that one is not applied (and shown) twice
+	function filterId(flt) {
+		return flt.kind + '\u0000' + (flt.kind === 'span' ? flt.by + '\u0000' + flt.key :
+			flt.kind === 'remove' ? flt.path.join('\u0000') :
+			flt.pattern.source + '/' + flt.pattern.flags + '\u0000' + (flt.under ? flt.under.join('\u0000') : ''));
+	}
+
+	function addFilter(flt) {
+		if (filters.some(f => filterId(f) === filterId(flt))) return;
+		applyFilter(flt);
+		filters.push(flt);
+		filtersChanged();
+	}
+
+	function applyFilter(flt) {
+		if (flt.kind === 'search') {
+			const under = flt.under ? frameAtPath(flt.under) : levels[0][0];
+			if (under) filterMatches(matchedFrames(flt.pattern, under));
+		} else if (flt.kind === 'hide') {
+			// right to left, so that the matches to the left stay where they are
+			const matches = matchedFrames(flt.pattern, levels[0][0]);
+			for (let i = matches.length - 1; i >= 0; i--) if (matches[i].level > 0) removeStack(matches[i].left, matches[i].width);
+		} else if (flt.kind === 'span') {
+			filterSpans(flt.by, flt.key);
+		} else {
+			const fr = frameAtPath(flt.path);
+			if (fr) removeStack(fr.left, fr.width);
+		}
+	}
+
+	function removeFilter(i) {
+		filters.splice(i, 1);
+		reapplyFilters();
+	}
+
+	function reapplyFilters() {
+		_swapLevels(reverseMode ? reverseLevelsCache : originalLevels);
+		_reapplySort();
+		for (const flt of filters) applyFilter(flt);
+		filtersChanged();
+	}
+
+	function filtersChanged() {
+		stacksRemoved = filters.length > 0;
+		document.getElementById('restoreBtn').disabled = !stacksRemoved;
+		updateFilterChips();
+		zoomFactor = 1; panSamples = 0;
+		render(levels[0][0]);
+	}
+
+	// The titles from the root to `fr`
+	function framePath(fr) {
+		const path = [fr.title];
+		for (let h = fr.level - 1; h >= 0; h--) path.unshift(findFrame(levels[h], fr.left).title);
+		return path;
+	}
+
+	function frameAtPath(path) {
+		let fr = levels[0][0];
+		if (!fr || fr.title !== path[0]) return null;
+		for (let h = 1; h < path.length; h++) {
+			const frames = levels[h], hi = fr.left + fr.width;
+			let a = 0, b = frames.length;
+			while (a < b) { const m = (a + b) >>> 1; if (frames[m].left < fr.left) a = m + 1; else b = m; }
+			let next = null;
+			for (let i = a; i < frames.length && frames[i].left < hi; i++) if (frames[i].title === path[h]) { next = frames[i]; break; }
+			if (!(fr = next)) return null;
+		}
+		return fr;
+	}
+
+	// The outermost frames matching `pattern` in the range of `under` (as render marks them)
+	function matchedFrames(pattern, under) {
+		const x0 = under.left, x1 = under.left + under.width, marked = [], out = [];
+		for (let h = 0; h < levels.length; h++) {
+			for (const f of levels[h]) {
+				if (f.left < x1 && f.left + f.width > x0 && f.title.match(pattern) && !marked[f.left]) marked[f.left] = f;
+			}
+		}
+		let left = 0;
+		Object.keys(marked).sort((a, b) => a - b).forEach(x => {
+			if (+x >= left) { out.push(marked[x]); left = +x + marked[x].width; }
+		});
+		return out;
+	}
+
+	// Keep only the samples under the frames `matches` (sorted, disjoint)
+	function filterMatches(matches) {
 		let prefix = 0;
-		const kept = nav.map(fr => {
+		const kept = matches.map(fr => {
 			const entry = {left: fr.left, right: fr.left + fr.width, prefix};
 			prefix += fr.width;
 			return entry;
@@ -621,24 +849,11 @@
 			levels[h] = newFrames;
 		}
 		levelsChanged();
-		stacksRemoved = true;
-		document.getElementById('restoreBtn').disabled = false;
-		zoomFactor = 1; panSamples = 0;
-		render(levels[0][0]);
 	}
 
 	function restoreStacks() {
-		for (let h = 0; h < levels.length; h++) {
-			levels[h] = originalLevels[h].map(fr => ({...fr}));
-		}
-		levelsChanged();
-		stacksRemoved = false;
-		filterHistory = [];
-		updateFilterChips();
-		document.getElementById('restoreBtn').disabled = true;
-		zoomFactor = 1; panSamples = 0;
-		_reapplySort();
-		render(levels[0][0]);
+		filters = [];
+		reapplyFilters();
 	}
 
 	function render(newRoot, nav) {
@@ -740,15 +955,30 @@
 
 	let useRegex = false;
 	let caseSensitive = false;
-	let filterHistory = [];
 	const HIGHLIGHT_COLORS = ['#ee00ee','#ff6600','#00bb44','#0099ff','#ffcc00','#ff2244','#00ccbb','#9944ff'];
 	let currentHighlightColor = HIGHLIGHT_COLORS[0];
 	let highlightChips = []; // [{term, pattern, color}]
 
+	// The filter chips, in the search bar and, nearer to where span filters are made, in the span panel
 	function updateFilterChips() {
-		const el = document.getElementById('filtchips');
+		fillFilterChips(document.getElementById('filtchips'));
+		document.getElementById('filtrow').classList.toggle('visible', filters.length > 0);
+		const panel = document.getElementById('spanfilts');
+		fillFilterChips(panel);
+		if (filters.length > 1) {
+			const clear = document.createElement('button');
+			clear.className = 'spanclear';
+			clear.textContent = 'clear all';
+			clear.title = 'Remove all the filters (as Restore)';
+			clear.onclick = restoreStacks;
+			panel.appendChild(clear);
+		}
+		panel.classList.toggle('visible', filters.length > 0);
+	}
+
+	function fillFilterChips(el) {
 		el.innerHTML = '';
-		filterHistory.forEach(function(term, i) {
+		filters.forEach(function(flt, i) {
 			if (i > 0) {
 				const sep = document.createElement('span');
 				sep.className = 'filt-chip-and';
@@ -757,11 +987,16 @@
 			}
 			const chip = document.createElement('span');
 			chip.className = 'filt-chip';
-			chip.textContent = term;
-			chip.title = 'Applied filter: ' + term;
+			chip.textContent = flt.label;
+			chip.title = flt.kind === 'remove' ? 'Removed stack: ' + flt.path.join(' \u2192 ') : 'Applied filter: ' + (flt.title || flt.label);
+			const x = document.createElement('button');
+			x.className = 'chip-x';
+			x.textContent = '\u00d7';
+			x.title = 'Remove this filter';
+			x.onclick = function(e) { e.stopPropagation(); removeFilter(i); };
+			chip.appendChild(x);
 			el.appendChild(chip);
 		});
-		document.getElementById('filtrow').classList.toggle('visible', filterHistory.length > 0);
 	}
 
 	function updateHighlightChips() {
@@ -775,7 +1010,8 @@
 			dot.className = 'hl-dot';
 			dot.style.background = chip.color;
 			const label = document.createElement('span');
-			label.textContent = chip.term;
+			label.textContent = chip.label || chip.term;
+			span.title = chip.term;
 			const x = document.createElement('button');
 			x.className = 'chip-x';
 			x.textContent = '\u00d7';
@@ -800,15 +1036,22 @@
 		try {
 			pat = RegExp(useRegex ? term : term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), caseSensitive ? '' : 'i');
 		} catch(e) { return; }
-		highlightChips.push({term: term, pattern: pat, color: currentHighlightColor});
-		const used = new Set(highlightChips.map(function(c) { return c.color; }));
-		currentHighlightColor = HIGHLIGHT_COLORS.find(function(c) { return !used.has(c); }) || HIGHLIGHT_COLORS[0];
-		updateHighlightChips();
-		document.querySelectorAll('.color-swatch').forEach(function(s) {
-			s.classList.toggle('selected', s.dataset.color === currentHighlightColor);
-		});
+		addHighlight(term, pat);
 		document.getElementById('searchinput').value = '';
 		search('');
+	}
+
+	// A highlight chip for frames matching `pat`, or for those with samples in a span group (`span`: {by, key})
+	function addHighlight(term, pat, span, label) {
+		if (highlightChips.some(c => c.term === term)) return;
+		highlightChips.push({term, label, pattern: pat, color: currentHighlightColor, span, frames: null, gen: -1});
+		const used = new Set(highlightChips.map(c => c.color));
+		currentHighlightColor = HIGHLIGHT_COLORS.find(c => !used.has(c)) || HIGHLIGHT_COLORS[0];
+		updateHighlightChips();
+		document.getElementById('searchbar').classList.add('open');  // the highlight chips are in the search bar
+		document.getElementById('search').classList.add('active');
+		document.querySelectorAll('.color-swatch').forEach(sw => sw.classList.toggle('selected', sw.dataset.color === currentHighlightColor));
+		render(root);
 	}
 
 	function buildColorPicker() {
@@ -934,8 +1177,7 @@
 				updateSpanPanel(f);
 				canvas.onclick = function() {
 					if ((event.altKey || event.ctrlKey) && h >= root.level && h > 0) {
-						removeStack(f.left, f.width);
-						root.width > f.width ? render(root) : render();
+						hideStack(f);
 					} else if (f !== root) {
 						render(f);
 					}
@@ -948,6 +1190,56 @@
 		}
 		canvas.onmouseout();
 	}
+
+	// Removes the stack of `f`, keeping the zoom unless the root goes too
+	function hideStack(f) {
+		filters.push({kind: 'remove', label: '\u2212 ' + displayName(f.title), path: framePath(f)});
+		removeStack(f.left, f.width);
+		stacksRemoved = true;
+		document.getElementById('restoreBtn').disabled = false;
+		updateFilterChips();
+		root.width > f.width ? render(root) : render();
+	}
+
+	// ── Context menu ──────────────────────────────────────────────────────────────
+	const ctxmenu = document.getElementById('ctxmenu');
+	function closeMenu() { ctxmenu.style.display = 'none'; }
+	addEventListener('mousedown', e => { if (!ctxmenu.contains(e.target)) closeMenu(); }, true);
+	addEventListener('blur', closeMenu);
+
+	canvas.oncontextmenu = function(e) {
+		const h = Math.floor((inverted ? e.offsetY : (canvasHeight - e.offsetY)) / 16);
+		const f = h >= 0 && h < levels.length ? findFrame(levels[h], e.offsetX / px + x0Rendered) : null;
+		if (!f) return;
+		e.preventDefault();
+		const name = displayName(f.title), isFrame = f.level > 0;
+		const exact = RegExp('^' + f.title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$');
+		const items = [
+			['Zoom to this frame', f !== root, () => render(f)],
+			['Keep only stacks through ' + name, isFrame, () => addFilter({kind: 'search', label: 'only ' + name, pattern: exact, under: null})],
+			['Hide stacks through ' + name, isFrame, () => addFilter({kind: 'hide', label: 'not ' + name, pattern: exact})],
+			['Hide this stack', isFrame && f.level >= root.level, () => hideStack(f)],
+			['Highlight ' + name, isFrame, () => addHighlight(f.title, exact)],
+			['Search for ' + name, isFrame, () => {
+				openSearch();
+				const inp = document.getElementById('searchinput');
+				inp.value = useRegex ? exact.source.slice(1, -1) : f.title;
+				search(inp.value);
+			}],
+			['Pin the span panel to this frame', hasSpans, () => pinSpanPanel(f)],
+			['Copy frame name', true, () => navigator.clipboard && navigator.clipboard.writeText(f.title)],
+		].filter(x => x[1]);
+		ctxmenu.textContent = '';
+		for (const [label, , action] of items) {
+			const item = document.createElement('div');
+			item.textContent = label;
+			item.onclick = () => { closeMenu(); action(); canvas.onmouseout(); };
+			ctxmenu.appendChild(item);
+		}
+		ctxmenu.style.display = 'block';
+		ctxmenu.style.left = Math.max(0, Math.min(e.clientX, innerWidth - ctxmenu.offsetWidth - 4)) + 'px';
+		ctxmenu.style.top = Math.max(0, Math.min(e.clientY, innerHeight - ctxmenu.offsetHeight - 4)) + 'px';
+	};
 
 	canvas.onmouseout = function() {
 		if (root) updateSpanPanel(root);
@@ -1134,7 +1426,7 @@
 		const term = document.getElementById('searchinput').value;
 		if (term && nav && nav.length > 0) {
 			addToHistory(term);
-			keepOnlyMatched(term);
+			addFilter({kind: 'search', label: term, pattern, under: root === levels[0][0] ? null : framePath(root)});
 			document.getElementById('searchinput').value = '';
 			search('');
 		}
@@ -1182,6 +1474,7 @@
 			openSearch();
 			return false;
 		} else if (event.key === 'Escape') {
+			closeMenu();
 			closeSearch();
 		} else if ((event.key === 'n' || event.key === 'N') && nav.length > 0) {
 			navIndex = (navIndex + (event.shiftKey ? nav.length - 1 : 1)) % nav.length;
@@ -1255,7 +1548,7 @@ self.postMessage({progress:1.0,stage:'Done'});self.postMessage({result:newLevels
 		zoomFactor = 1; panSamples = 0;
 		pattern = undefined; nav = []; navIndex = -1; matchval = '';
 		document.getElementById('matchpct').style.display = 'none';
-		filterHistory = []; updateFilterChips();
+		filters = []; updateFilterChips();
 		highlightChips = []; updateHighlightChips();
 		stacksRemoved = false;
 		document.getElementById('restoreBtn').disabled = true;

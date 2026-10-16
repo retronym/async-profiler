@@ -249,6 +249,9 @@ public class FlameGraph implements Comparator<Frame> {
         tail = printTill(out, tail, "/*depth:*/0");
         out.print(depth);
 
+        tail = printTill(out, tail, "/*spanconfig:*/null");
+        out.print(args.spanConfig != null ? spanConfig(args.spanConfig) : "null");
+
         tail = printTill(out, tail, "/*cpool:*/");
         printCpool(out);
 
@@ -260,6 +263,23 @@ public class FlameGraph implements Comparator<Frame> {
         out.print(args.highlight != null ? "'" + escape(args.highlight) + "'" : "");
 
         out.print(tail);
+    }
+
+    // The span panel's groupings (--span-config): JSON, given inline or as a file, embedded in the page script as is
+    private static String spanConfig(String arg) {
+        String json = arg.trim();
+        if (!json.startsWith("{")) {
+            try {
+                json = new String(java.nio.file.Files.readAllBytes(java.nio.file.Paths.get(arg)), StandardCharsets.UTF_8).trim();
+            } catch (IOException e) {
+                throw new IllegalArgumentException("Cannot read --span-config " + arg + ": " + e);
+            }
+        }
+        if (!json.startsWith("{") || !json.endsWith("}")) {
+            throw new IllegalArgumentException("--span-config must be a JSON object");
+        }
+        // '<' is only valid inside a JSON string, where this escape keeps it from closing the script
+        return json.replace("<", "\\u003c");
     }
 
     private void printCpool(PrintStream out) {
