@@ -38,6 +38,23 @@ final class Spans {
         pending.clear();
     }
 
+    /** Appends the spans of thread `tid` for the timeline: start and end in µs after `t0Nanos`, parent span index (or
+     *  -1) and tag index into `tags`, flat */
+    void appendSpans(StringBuilder sb, int tid, long t0Nanos, List<String> outTags, Map<String, Integer> outTagIds) {
+        ThreadSpans s = byThread.get(tid);
+        if (s == null) return;
+        for (int i = 0; i < s.starts.length; i++) {
+            String tag = tags.get(s.tags[i]);
+            int id = outTagIds.computeIfAbsent(tag, t -> {
+                outTags.add(t);
+                return outTags.size() - 1;
+            });
+            if (i > 0) sb.append(',');
+            sb.append((s.starts[i] - t0Nanos) / 1000).append(',').append((s.ends[i] - t0Nanos) / 1000).append(',')
+              .append(s.parents[i]).append(',').append(id);
+        }
+    }
+
     /** The path of the spans on thread `tid` enclosing `timeNanos`, or null if there are none */
     String pathAt(int tid, long timeNanos) {
         ThreadSpans s = byThread.get(tid);

@@ -30,6 +30,14 @@
 	#hl span {padding: 0 3px 0 3px}
 	#status {left: 0}
 	#toolbar {position: sticky; top: 0; z-index: 10; background: var(--bg)}
+	/* Time lane (--spans): sample density and spans over time; a selected range filters the flame graph */
+	#timeline {display: none; margin: 4px 0 8px 0}
+	#timeline.visible {display: block}
+	#tlhead {display: flex; gap: 8px; align-items: baseline; font-size: 11px; margin-bottom: 2px}
+	#tlinfo {opacity: 0.7; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap}
+	#tlthread {font: 11px Verdana, sans-serif; background: var(--bg); color: var(--fg); border: 1px solid var(--legend-border)}
+	#tlcanvas {width: 100%; display: block; cursor: crosshair; border: 1px solid var(--hl-border); border-radius: 3px}
+	#tltip {position: fixed; display: none; z-index: 40; pointer-events: none; background: var(--legend-bg); border: 1px solid var(--legend-border); border-radius: 4px; padding: 3px 6px; font-size: 11px; max-width: 600px; color: var(--fg)}
 	/* Span panel (--spans): where the samples under the hovered frame were taken, by span tag */
 	#spanpanel {position: fixed; right: 12px; bottom: 28px; z-index: 20; width: 560px; max-height: 60vh; overflow: auto; display: none; background: var(--legend-bg); border: 1px solid var(--legend-border); border-radius: 4px; padding: 6px 8px; font-size: 11px; box-shadow: 0 2px 8px rgba(0,0,0,0.2)}
 	#spanpanel.open {display: block}
@@ -206,6 +214,8 @@
 </dl>
 </div>
 </div>
+<div id='timeline'><div id='tlhead'><b>Time</b><select id='tlthread' title='Thread'></select><span id='tlinfo'></span></div><canvas id='tlcanvas'></canvas></div>
+<div id='tltip'></div>
 <canvas id='canvas'></canvas>
 <div id='hl'><span></span></div>
 <div id='selbox'></div>
@@ -292,15 +302,24 @@
 	// Span tags (type 7, from --spans) are leaves after the stack: kept on their parent frame for the span panel,
 	// not drawn
 	let hasSpans = false;
+	// Each frame's index in the converter's output order (idx) and its parent's (pidx): the timeline's samples refer to
+	// frames by index. A span leaf's index maps to its parent and tag (spanLeaf).
+	let frameCount = 0;
+	const spanLeaf = [];
 	function f(key, level, left, width, inln, c1, int) {
+		const idx = frameCount++;
 		if ((key & 7) === 7) {
 			level0 = level; left0 += left; width0 = width || width0;
 			const parent = levels[level - 1][levels[level - 1].length - 1];
-			if (parent) (parent.spans || (parent.spans = [])).push(key >>> 3, width0);
+			if (parent) {
+				(parent.spans || (parent.spans = [])).push(key >>> 3, width0);
+				spanLeaf[idx] = [parent.idx, key >>> 3];
+			}
 			hasSpans = true;
 			return;
 		}
-		levels[level0 = level].push({level, left: left0 += left, width: width0 = width || width0,
+		const parent = level > 0 ? levels[level - 1][levels[level - 1].length - 1] : null;
+		levels[level0 = level].push({level, idx, pidx: parent ? parent.idx : -1, left: left0 += left, width: width0 = width || width0,
 			color: maxdiff >= 0 ? getDiffColor(d) : getColor(palette[key & 7]),
 			title: cpool[key >>> 3],
 			details: (d ? (d > 0 ? ', +' : ', ') + d : '') + (int ? ', int=' + int : '') + (c1 ? ', c1=' + c1 : '') + (inln ? ', inln=' + inln : '')
@@ -326,6 +345,9 @@
 	//   {"markers": [...], "groups": [{"label": ..., "by": ..., ...}, ...]}
 	const spanConfig = /*spanconfig:*/null || {};
 	const SPAN_MARKERS = new Set(spanConfig.markers || []);
+	// Spans that are a cost of their own wherever they happen (e.g. a shared table's growth): grouped under their own
+	// name, not their enclosing spans', in every grouping
+	const SPAN_STANDALONE = new Set(spanConfig.standalone || []);
 	let spanGroups = null;  // the groupings, built on first use; a grouping is referred to by its index
 	function initSpanGroups() {
 		if (spanConfig.groups) return spanGroups = spanConfig.groups;
@@ -348,6 +370,8 @@
 	}
 	function spanKey(tag, g) {
 		const parts = tag.split(' > ');
+		const last = parts[parts.length - 1];
+		if (SPAN_STANDALONE.has(last)) return last;
 		const named = p => !g.skipMarkers || !SPAN_MARKERS.has(p);
 		if (g.by === 'innermost') {
 			for (let i = parts.length - 1; i >= 0; i--) if (named(parts[i])) return parts[i];
@@ -729,6 +753,239 @@
 		render(root);
 	}
 
+	// ── Time lane (--spans) ─────────────────────────────────────────────────────
+	// The converter embeds the samples with their times and frames, and the spans of their threads (const timeline):
+	// the lane shows sample density and the spans over time; a selected range keeps only its samples (a 'time' filter,
+	// applied first, to the unfiltered top-down frames, since samples refer to those).
+	const TL = {threads: [], th: null, v0: 0, v1: 1, sel: null, drag: null, rows: 0};
+	const TL_DENSITY_H = 18, TL_ROW_H = 13;
+
+	function initTimeline() {
+		if (!timeline || !timeline.threads.length) return;
+		for (const t of timeline.threads) {
+			const n = t.s.length / 2, times = new Float64Array(n), frames = new Int32Array(n);
+			let at = 0;
+			for (let i = 0; i < n; i++) { at += t.s[2 * i]; times[i] = at; frames[i] = t.s[2 * i + 1]; }
+			const m = t.sp.length / 4, spans = [];
+			const depth = new Int32Array(m);
+			for (let i = 0; i < m; i++) {
+				const p = t.sp[4 * i + 2];
+				depth[i] = p >= 0 ? depth[p] + 1 : 0;
+				spans.push({s: t.sp[4 * i], e: t.sp[4 * i + 1], p, tag: timeline.tags[t.sp[4 * i + 3]], d: depth[i]});
+			}
+			const end = Math.max(n ? times[n - 1] : 0, ...spans.slice(-1).map(x => x.e));
+			TL.threads.push({name: t.name, times, frames, spans, end, maxDepth: m ? Math.max(...depth) + 1 : 0});
+		}
+		TL.threads.sort((a, b) => b.times.length - a.times.length);
+		const sel = document.getElementById('tlthread');
+		TL.threads.forEach((t, i) => sel.add(new Option(t.name + ' (' + t.times.length.toLocaleString() + ' samples)', i)));
+		sel.style.display = TL.threads.length > 1 ? '' : 'none';
+		sel.onchange = () => { tlSetThread(+sel.value); };
+		tlSetThread(0);
+		document.getElementById('timeline').classList.add('visible');
+		const cv = document.getElementById('tlcanvas');
+		new ResizeObserver(() => drawTimeline()).observe(cv);
+		cv.addEventListener('wheel', tlWheel, {passive: false});
+		cv.onmousedown = tlDown;
+		cv.onmousemove = tlMove;
+		cv.onmouseleave = () => { document.getElementById('tltip').style.display = 'none'; };
+		cv.ondblclick = () => { TL.v0 = 0; TL.v1 = TL.th.end || 1; drawTimeline(); };
+		window.addEventListener('mouseup', tlUp);
+	}
+
+	function tlSetThread(i) {
+		TL.th = TL.threads[i];
+		TL.v0 = 0; TL.v1 = TL.th.end || 1;
+		TL.rows = Math.min(TL.th.maxDepth, 12);
+		const cv = document.getElementById('tlcanvas');
+		cv.style.height = (TL_DENSITY_H + TL.rows * TL_ROW_H + 4) + 'px';
+		drawTimeline();
+	}
+
+	function fmtTime(us) {
+		if (us < 0) return '\u2212' + fmtTime(-us);
+		return us >= 1e6 ? (us / 1e6).toFixed(us >= 1e7 ? 1 : 2) + ' s' : us >= 1e3 ? (us / 1e3).toFixed(us >= 1e4 ? 0 : 1) + ' ms' : Math.round(us) + ' µs';
+	}
+
+	function tlX(t, w) { return (t - TL.v0) / (TL.v1 - TL.v0) * w; }
+	function tlT(x, w) { return TL.v0 + x / w * (TL.v1 - TL.v0); }
+
+	function lowerBound(arr, t) {
+		let lo = 0, hi = arr.length;
+		while (lo < hi) { const m = (lo + hi) >>> 1; if (arr[m] < t) lo = m + 1; else hi = m; }
+		return lo;
+	}
+
+	const TL_COLORS = ['#c8c83c', '#e17d00', '#50cccc', '#50e150', '#b2e1b2', '#cce880', '#e15a5a'];
+	function drawTimeline() {
+		const th = TL.th;
+		if (!th) return;
+		const cv = document.getElementById('tlcanvas'), dpr = devicePixelRatio || 1;
+		const w = cv.clientWidth, h = cv.clientHeight;
+		cv.width = w * dpr; cv.height = h * dpr;
+		const g = cv.getContext('2d');
+		g.scale(dpr, dpr);
+		g.font = '10px Verdana, sans-serif';
+		const fg = getComputedStyle(document.documentElement).getPropertyValue('--fg');
+		// density: samples per pixel column, as heat
+		const cols = Math.max(1, Math.floor(w)), counts = new Float64Array(cols);
+		const a = lowerBound(th.times, TL.v0), b = lowerBound(th.times, TL.v1);
+		for (let i = a; i < b; i++) counts[Math.min(cols - 1, Math.floor(tlX(th.times[i], w)))]++;
+		let max = 0;
+		for (const c of counts) max = Math.max(max, c);
+		for (let x = 0; x < cols; x++) {
+			if (!counts[x]) continue;
+			const v = Math.sqrt(counts[x] / max);
+			g.fillStyle = 'rgba(225,90,90,' + (0.15 + 0.85 * v).toFixed(3) + ')';
+			g.fillRect(x, 0, 1, TL_DENSITY_H);
+		}
+		// spans, by depth
+		const span = TL.v1 - TL.v0;
+		for (const sp of th.spans) {
+			if (sp.d >= TL.rows || sp.e <= TL.v0 || sp.s >= TL.v1) continue;
+			const x0 = Math.max(0, tlX(sp.s, w)), x1 = Math.min(w, tlX(sp.e, w));
+			if (x1 - x0 < 0.5) continue;
+			const y = TL_DENSITY_H + 2 + sp.d * TL_ROW_H;
+			g.fillStyle = TL_COLORS[sp.d % TL_COLORS.length];
+			g.fillRect(x0, y, Math.max(1, x1 - x0 - 0.5), TL_ROW_H - 1);
+			if (x1 - x0 > 30) {
+				g.fillStyle = '#000';
+				const label = spanLabel(sp.tag), chars = Math.floor((x1 - x0 - 4) / 6);
+				g.fillText(label.length <= chars ? label : label.substring(0, Math.max(0, chars - 1)) + '\u2026', x0 + 2, y + TL_ROW_H - 3);
+			}
+		}
+		// selection
+		const sel = TL.drag || TL.sel;
+		if (sel) {
+			const x0 = tlX(Math.min(sel.from, sel.to), w), x1 = tlX(Math.max(sel.from, sel.to), w);
+			g.fillStyle = 'rgba(100,150,255,0.2)';
+			g.fillRect(x0, 0, Math.max(1, x1 - x0), h);
+			g.strokeStyle = 'rgba(100,150,255,0.8)';
+			g.strokeRect(x0 + 0.5, 0.5, Math.max(1, x1 - x0) - 1, h - 1);
+		}
+		const n = b - a;
+		document.getElementById('tlinfo').textContent = fmtTime(TL.v0) + ' \u2013 ' + fmtTime(TL.v1) + ' shown (' + fmtTime(span) + ', ' + n.toLocaleString() + ' samples, ' + th.spans.length.toLocaleString() + ' spans). Drag to select a range, click a span to select it, wheel to zoom, double-click to show all.';
+	}
+
+	function spanLabel(tag) {
+		return shortSpan(tag);
+	}
+
+	function tlSpanAt(x, y, w) {
+		const row = Math.floor((y - TL_DENSITY_H - 2) / TL_ROW_H);
+		if (row < 0 || row >= TL.rows) return null;
+		const t = tlT(x, w), th = TL.th;
+		let best = null;
+		for (const sp of th.spans) if (sp.d === row && sp.s <= t && t < sp.e) { best = sp; break; }
+		return best;
+	}
+
+	function spanPathOf(sp) {
+		const parts = [];
+		for (let q = sp; q; q = q.p >= 0 ? TL.th.spans[q.p] : null) parts.unshift(q.tag);
+		return parts.join(' > ');
+	}
+
+	function tlWheel(e) {
+		e.preventDefault();
+		const w = e.target.clientWidth, at = tlT(e.offsetX, w), k = Math.exp(e.deltaY * 0.002);
+		const end = TL.th.end || 1;
+		let v0 = at - (at - TL.v0) * k, v1 = at + (TL.v1 - at) * k;
+		if (v1 - v0 < 50) return;  // 50 µs
+		v0 = Math.max(0, v0); v1 = Math.min(end, v1);
+		TL.v0 = v0; TL.v1 = v1;
+		drawTimeline();
+	}
+
+	function tlDown(e) {
+		const w = e.target.clientWidth;
+		TL.drag = {from: tlT(e.offsetX, w), to: tlT(e.offsetX, w), x: e.offsetX, y: e.offsetY};
+	}
+
+	function tlMove(e) {
+		const w = e.target.clientWidth;
+		if (TL.drag) { TL.drag.to = tlT(e.offsetX, w); drawTimeline(); return; }
+		const sp = tlSpanAt(e.offsetX, e.offsetY, w), tip = document.getElementById('tltip');
+		if (sp) {
+			tip.textContent = spanPathOf(sp) + ' \u2014 ' + fmtTime(sp.e - sp.s) + ' (' + fmtTime(sp.s) + ' \u2013 ' + fmtTime(sp.e) + ')';
+			tip.style.left = (e.clientX + 12) + 'px'; tip.style.top = (e.clientY + 12) + 'px'; tip.style.display = 'block';
+		} else {
+			tip.style.display = 'none';
+		}
+	}
+
+	function tlUp(e) {
+		const d = TL.drag;
+		if (!d) return;
+		TL.drag = null;
+		const cv = document.getElementById('tlcanvas'), w = cv.clientWidth;
+		let from = Math.min(d.from, d.to), to = Math.max(d.from, d.to);
+		if (Math.abs(tlX(to, w) - tlX(from, w)) < 3) {
+			// a click: the span under it, if any
+			const sp = tlSpanAt(d.x, d.y, w);
+			if (!sp) { drawTimeline(); return; }
+			from = sp.s; to = sp.e;
+		}
+		setTimeFilter(from, to);
+	}
+
+	function setTimeFilter(from, to) {
+		if (reverseMode) deactivateReverseView();  // samples refer to the top-down frames
+		filters = filters.filter(f => f.kind !== 'time');
+		const thread = TL.threads.indexOf(TL.th), th = TL.th;
+		const n = lowerBound(th.times, to) - lowerBound(th.times, from);
+		filters.unshift({kind: 'time', thread, from, to,
+			label: 'time: ' + fmtTime(from) + ' \u2013 ' + fmtTime(to),
+			title: 'time: ' + fmtTime(from) + ' \u2013 ' + fmtTime(to) + ' on ' + th.name + ' (' + n.toLocaleString() + ' samples)'});
+		TL.sel = {from, to};
+		reapplyFilters();
+		openSearch();  // the filter chips are in the search bar
+		drawTimeline();
+	}
+
+	// Rebuilds the frames from the samples of `thread` in [from, to): own samples first, then the children
+	function filterTime(thread, from, to) {
+		const th = TL.threads[thread];
+		const own = new Map(), spanCounts = new Map();
+		for (let i = lowerBound(th.times, from), e = lowerBound(th.times, to); i < e; i++) {
+			let idx = th.frames[i];
+			const leaf = spanLeaf[idx];
+			if (leaf) {
+				idx = leaf[0];
+				let m = spanCounts.get(idx);
+				if (!m) spanCounts.set(idx, m = new Map());
+				m.set(leaf[1], (m.get(leaf[1]) || 0) + 1);
+			}
+			own.set(idx, (own.get(idx) || 0) + 1);
+		}
+		const sub = new Map(own);
+		for (let h = levels.length - 1; h > 0; h--) {
+			for (const fr of levels[h]) {
+				const n = sub.get(fr.idx);
+				if (n) sub.set(fr.pidx, (sub.get(fr.pidx) || 0) + n);
+			}
+		}
+		const next = new Map(), out = levels.map(() => []);
+		for (let h = 0; h < levels.length; h++) {
+			for (const fr of levels[h]) {
+				const w = sub.get(fr.idx);
+				if (!w) continue;
+				let left = 0;
+				if (h > 0) {
+					left = next.get(fr.pidx);
+					if (left === undefined) continue;
+					next.set(fr.pidx, left + w);
+				}
+				next.set(fr.idx, left + (own.get(fr.idx) || 0));
+				const m = spanCounts.get(fr.idx), spans = [];
+				if (m) for (const [tag, c] of m) spans.push(tag, c);
+				out[h].push({...fr, left, width: w, spans: spans.length ? spans : undefined});
+			}
+		}
+		for (let h = 0; h < levels.length; h++) levels[h] = out[h];
+		levelsChanged();
+	}
+
 	// ── Filters ─────────────────────────────────────────────────────────────────
 	// The filters applied to the frames, in order: a search ({pattern, under: the path of the zoom root, if any}),
 	// hiding the stacks through matching frames ({pattern}), a span group ({by, key}) or a removed stack ({path}). Removing one replays the others on the unfiltered frames,
@@ -737,7 +994,7 @@
 
 	// What makes two filters the same, so that one is not applied (and shown) twice
 	function filterId(flt) {
-		return flt.kind + '\u0000' + (flt.kind === 'span' ? flt.by + '\u0000' + flt.key :
+		return flt.kind + '\u0000' + (flt.kind === 'time' ? flt.from + '-' + flt.to : flt.kind === 'span' ? flt.by + '\u0000' + flt.key :
 			flt.kind === 'remove' ? flt.path.join('\u0000') :
 			flt.pattern.source + '/' + flt.pattern.flags + '\u0000' + (flt.under ? flt.under.join('\u0000') : ''));
 	}
@@ -759,6 +1016,8 @@
 			for (let i = matches.length - 1; i >= 0; i--) if (matches[i].level > 0) removeStack(matches[i].left, matches[i].width);
 		} else if (flt.kind === 'span') {
 			filterSpans(flt.by, flt.key);
+		} else if (flt.kind === 'time') {
+			filterTime(flt.thread, flt.from, flt.to);
 		} else {
 			const fr = frameAtPath(flt.path);
 			if (fr) removeStack(fr.left, fr.width);
@@ -778,6 +1037,7 @@
 	}
 
 	function filtersChanged() {
+		if (TL.sel && !filters.some(f => f.kind === 'time')) { TL.sel = null; drawTimeline(); }
 		stacksRemoved = filters.length > 0;
 		document.getElementById('restoreBtn').disabled = !stacksRemoved;
 		updateFilterChips();
@@ -1698,10 +1958,12 @@ const cpool = [
 unpack(cpool);
 
 /*frames:*/
+const timeline = /*timeline:*/null;
 render(levels[0][0]);
 { const h = /*highlight:*/null; if (h) { search(h); document.getElementById('searchinput').value = h; openSearch(); } }
 
 // Snapshot original frame data so removed stacks can be restored
 const originalLevels = levels.map(h => h.map(fr => ({...fr})));
+initTimeline();
 { let w = ''; try { w = localStorage.getItem('flame-sort-weight'); } catch (ignored) {} if (w) setSortByWeight(true); }
 </script></body></html>

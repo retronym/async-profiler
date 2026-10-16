@@ -83,6 +83,15 @@ public abstract class JfrConverter extends Classifier {
         return new Filter(deltas);
     }
 
+    /** Called for each sample collected with its span path (--spans), with its time */
+    protected void onSample(Spans.TaggedEvent event, long timeNanos) {
+    }
+
+    /** The spans read for --spans, or null */
+    protected Spans spans() {
+        return spans;
+    }
+
     /** Whether this converter shows span paths (--spans): it must unwrap Spans.TaggedEvent itself */
     protected boolean supportsSpans() {
         return false;
@@ -144,8 +153,11 @@ public abstract class JfrConverter extends Classifier {
                 if (threadStates == null || threadStates.get(((ExecutionSample) event).threadState)) {
                     if (filter == null || filter.matches(event.tid, jfr.eventTimeToNanos(event.time))) {
                         if (spans != null) {
-                            String tag = spans.pathAt(event.tid, jfr.eventTimeToNanos(event.time));
-                            collector.collect(new Spans.TaggedEvent(event, tag != null ? tag : "[no span]"));
+                            long timeNanos = jfr.eventTimeToNanos(event.time);
+                            String tag = spans.pathAt(event.tid, timeNanos);
+                            Spans.TaggedEvent tagged = new Spans.TaggedEvent(event, tag != null ? tag : "[no span]");
+                            collector.collect(tagged);
+                            onSample(tagged, timeNanos);
                         } else {
                             collector.collect(event);
                         }
