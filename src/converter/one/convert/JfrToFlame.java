@@ -34,6 +34,11 @@ public class JfrToFlame extends JfrConverter {
 
             @Override
             public void visit(Event event, long value) {
+                String spanTag = null;
+                if (event instanceof Spans.TaggedEvent) {
+                    spanTag = ((Spans.TaggedEvent) event).tag;
+                    event = ((Spans.TaggedEvent) event).event;
+                }
                 StackTrace stackTrace = jfr.stackTraces.get(event.stackTraceId);
                 if (stackTrace != null) {
                     Arguments args = JfrToFlame.this.args;
@@ -43,6 +48,14 @@ public class JfrToFlame extends JfrConverter {
 
                     if (args.threads) {
                         stack.push(getThreadName(event.tid), TYPE_NATIVE);
+                    }
+                    if (spanTag != null) {
+                        // a tag can name a path of nested regions, outermost first, separated by ';'
+                        for (int from = 0, to; from <= spanTag.length(); from = to + 1) {
+                            to = spanTag.indexOf(';', from);
+                            if (to < 0) to = spanTag.length();
+                            stack.push(spanTag.substring(from, to), TYPE_KERNEL);
+                        }
                     }
                     if (args.classify) {
                         Classifier.Category category = getCategory(stackTrace);

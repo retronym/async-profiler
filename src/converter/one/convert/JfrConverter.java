@@ -23,6 +23,8 @@ public abstract class JfrConverter extends Classifier {
     protected final Arguments args;
     protected final EventCollector collector;
     protected Dictionary<String> methodNames;
+    // With --spans: each thread's spans, to tag each sample with its innermost span
+    private Spans spans;
 
     public JfrConverter(JfrReader jfr, Arguments args) {
         this.jfr = jfr;
@@ -34,6 +36,7 @@ public abstract class JfrConverter extends Classifier {
 
     public void convert() throws IOException {
         Filter filter = readFilter();
+        spans = args.spans ? readSpans() : null;
 
         jfr.stopAtNewChunk = true;
         while (jfr.hasMoreChunks()) {
@@ -79,6 +82,21 @@ public abstract class JfrConverter extends Classifier {
         return new Filter(deltas);
     }
 
+    private Spans readSpans() throws IOException {
+        Spans spans = new Spans();
+        jfr.stopAtNewChunk = true;
+        while (jfr.hasMoreChunks()) {
+            for (IntervalEvent event; (event = jfr.readEvent(IntervalEvent.class)) != null; ) {
+                if (event instanceof SpanEvent && event.tag() != null) {
+                    spans.add(event.tid, jfr.eventTimeToNanos(event.time), jfr.eventTimeToNanos(event.time + event.duration), event.tag());
+                }
+            }
+        }
+        jfr.rewind();
+        spans.build();
+        return spans;
+    }
+
     protected EventCollector createCollector(Arguments args) {
         return new EventAggregator(args.threads, args.grain);
     }
@@ -119,7 +137,12 @@ public abstract class JfrConverter extends Classifier {
                 }
                 if (threadStates == null || threadStates.get(((ExecutionSample) event).threadState)) {
                     if (filter == null || filter.matches(event.tid, jfr.eventTimeToNanos(event.time))) {
-                        collector.collect(event);
+                        if (spans != null) {
+                            String tag = spans.tagAt(event.tid, jfr.eventTimeToNanos(event.time));
+                            collector.collect(new Spans.TaggedEvent(event, tag != null ? tag : "[no span]"));
+                        } else {
+                            collector.collect(event);
+                        }
                     }
                 }
             }
