@@ -792,6 +792,8 @@
 		return path;
 	}
 
+	function withoutTid(title) { return title.replace(/ tid=\d+\]$/, ']'); }
+
 	function frameAtPath(path) {
 		let fr = levels[0][0];
 		if (!fr || fr.title !== path[0]) return null;
@@ -799,9 +801,13 @@
 			const frames = levels[h], hi = fr.left + fr.width;
 			let a = 0, b = frames.length;
 			while (a < b) { const m = (a + b) >>> 1; if (frames[m].left < fr.left) a = m + 1; else b = m; }
-			let next = null;
-			for (let i = a; i < frames.length && frames[i].left < hi; i++) if (frames[i].title === path[h]) { next = frames[i]; break; }
-			if (!(fr = next)) return null;
+			let next = null, sameThread = null;
+			for (let i = a; i < frames.length && frames[i].left < hi; i++) {
+				if (frames[i].title === path[h]) { next = frames[i]; break; }
+				// a thread of the same name in another recording (as a linked graph's path names it) has another tid
+				if (!sameThread && withoutTid(frames[i].title) === withoutTid(path[h])) sameThread = frames[i];
+			}
+			if (!(fr = next || sameThread)) return null;
 		}
 		return fr;
 	}
@@ -942,6 +948,7 @@
 
 		const total = totalMarked();
 		updateZoomDisplay();
+		linkChanged();
 		return total;
 	}
 
@@ -1567,6 +1574,7 @@ self.postMessage({progress:1.0,stage:'Done'});self.postMessage({result:newLevels
 		_reapplySort();
 		_resetView();
 		render(levels[0][0]);
+		linkResume();
 	}
 
 	function deactivateReverseView() {
@@ -1576,6 +1584,7 @@ self.postMessage({progress:1.0,stage:'Done'});self.postMessage({result:newLevels
 		_reapplySort();
 		_resetView();
 		render(levels[0][0]);
+		linkResume();
 	}
 
 	function computeReverseView() {
@@ -1691,6 +1700,96 @@ self.postMessage({progress:1.0,stage:'Done'});self.postMessage({result:newLevels
 
 	document.getElementById('sortw').onclick = function() { setSortByWeight(!sortedByWeight); };
 
+	// ── Linked views ──────────────────────────────────────────────────────────
+	// Embedded in a page that shows several graphs of one profile (perflab's compare page: both runs and the diffs),
+	// each graph posts the state of its controls to the parent after every change, as {flameState}, and applies a
+	// {flameState} the parent relays from another graph. The graphs have different frames, so the state names them:
+	// the view toggles, the search, the highlights and filters, and the zoom as the path of titles to its root, with
+	// the visual zoom and the pan as a fraction of that root. A state just applied is not posted back.
+	const linked = window.parent !== window;
+	let linkApplying = false, linkSent = null, linkTimer = null, linkPending = null;
+
+	function patternState(p) { return p ? {source: p.source, flags: p.flags} : undefined; }
+	function patternOf(p) { return p ? RegExp(p.source, p.flags) : undefined; }
+
+	function flameState() {
+		return {
+			dark: document.documentElement.classList.contains('dark'), shortNames, inverted, reverse: reverseMode,
+			sortw: sortedByWeight,
+			search: {open: document.getElementById('searchbar').classList.contains('open'),
+				term: document.getElementById('searchinput').value, regex: useRegex, caseSensitive},
+			highlights: highlightChips.map(c => ({term: c.term, label: c.label, pattern: patternState(c.pattern), color: c.color, span: c.span})),
+			highlightColor: currentHighlightColor,
+			filters: filters.map(f => ({...f, pattern: patternState(f.pattern)})),
+			focus: root && root !== levels[0][0] ? framePath(root) : null,
+			zoom: zoomFactor, pan: root ? panSamples / root.width : 0,
+		};
+	}
+
+	function linkChanged() {
+		if (!linked || linkApplying) return;
+		clearTimeout(linkTimer);
+		linkTimer = setTimeout(function() {
+			const s = JSON.stringify(flameState());
+			if (s !== linkSent) { linkSent = s; window.parent.postMessage({flameState: JSON.parse(s)}, '*'); }
+		}, 60);
+	}
+
+	function linkResume() {
+		if (linkPending) { const s = linkPending; linkPending = null; applyFlameState(s); }
+	}
+
+	function applyFlameState(s) {
+		linkApplying = true;
+		try {
+			document.documentElement.classList.toggle('dark', s.dark);
+			if (s.shortNames !== shortNames) {
+				shortNames = s.shortNames;
+				document.getElementById('shortn').classList.toggle('active', shortNames);
+			}
+			inverted = s.inverted;
+			if (s.reverse !== reverseMode) {
+				// the bottom-up view resets the rest; apply it once that view is in place (perhaps after its worker)
+				linkPending = s;
+				if (s.reverse) computeReverseView(); else deactivateReverseView();
+				return;
+			}
+			setSortByWeight(s.sortw);
+			const fs = JSON.stringify(s.filters);
+			if (fs !== JSON.stringify(filters.map(f => ({...f, pattern: patternState(f.pattern)})))) {
+				filters = s.filters.map(f => ({...f, pattern: patternOf(f.pattern)}));
+				reapplyFilters();
+			}
+			highlightChips = s.highlights.map(c => ({term: c.term, label: c.label, pattern: patternOf(c.pattern), color: c.color,
+				span: c.span, frames: null, gen: -1}));
+			currentHighlightColor = s.highlightColor;
+			document.querySelectorAll('.color-swatch').forEach(sw => sw.classList.toggle('selected', sw.dataset.color === currentHighlightColor));
+			updateHighlightChips();
+			render((s.focus && frameAtPath(s.focus)) || levels[0][0]);
+			zoomFactor = s.zoom;
+			panSamples = s.pan * root.width;
+			clampPan();
+			useRegex = s.search.regex;
+			caseSensitive = s.search.caseSensitive;
+			document.getElementById('toggleRegex').classList.toggle('active', useRegex);
+			document.getElementById('toggleCase').classList.toggle('active', caseSensitive);
+			document.getElementById('searchinput').placeholder = useRegex ? 'Regex…' : 'Search…';
+			// opened without taking the focus, which stays in the graph the change came from
+			document.getElementById('searchbar').classList.toggle('open', s.search.open);
+			document.getElementById('search').classList.toggle('active', s.search.open);
+			document.getElementById('searchinput').value = s.search.term;
+			search(s.search.term);
+		} finally {
+			linkApplying = false;
+		}
+		linkSent = JSON.stringify(flameState());
+	}
+
+	if (linked) addEventListener('message', function(e) {
+		if (e.source === window.parent && e.data && e.data.flameState) applyFlameState(e.data.flameState);
+	});
+
+
 
 const cpool = [
 /*cpool:*/
@@ -1704,4 +1803,6 @@ render(levels[0][0]);
 // Snapshot original frame data so removed stacks can be restored
 const originalLevels = levels.map(h => h.map(fr => ({...fr})));
 { let w = ''; try { w = localStorage.getItem('flame-sort-weight'); } catch (ignored) {} if (w) setSortByWeight(true); }
+// the state as loaded is not a change to post
+if (linked) linkSent = JSON.stringify(flameState());
 </script></body></html>
