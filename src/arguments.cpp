@@ -293,6 +293,12 @@ Error Arguments::parse(const char* args) {
                 }
                 _fdtransfer_path = value;
 
+            CASE("kperf")
+                if (value == NULL || value[0] == 0) {
+                    msg = "kperf path must not be empty";
+                }
+                _kperf_path = value;
+
             // Filters
             CASE("filter")
                 _filter = value == NULL ? "" : value;

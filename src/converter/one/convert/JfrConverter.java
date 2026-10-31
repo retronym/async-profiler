@@ -81,7 +81,8 @@ public abstract class JfrConverter extends Classifier {
 
     protected void collectEvents(TimeIntervals timeIntervals) throws IOException {
         // args.nativemem ? MallocEvent.class should always be first for the leak detection feature
-        Class<? extends Event> eventClass = args.nativemem ? MallocEvent.class
+        Class<? extends Event> eventClass = args.hw != null ? HardwareSample.class
+                : args.nativemem ? MallocEvent.class
                 : args.nativelock ? NativeLockEvent.class
                 : args.live ? LiveObject.class
                 : args.alloc ? AllocationSample.class
@@ -109,6 +110,9 @@ public abstract class JfrConverter extends Classifier {
 
         for (Event event; (event = jfr.readEvent(eventClass)) != null; ) {
             if (event.time >= startTicks && event.time <= endTicks) {
+                if (args.hw != null && !args.hw.equals(((HardwareSample) event).event)) {
+                    continue;
+                }
                 if (threadStates == null || threadStates.get(((ExecutionSample) event).threadState)) {
                     if (timeIntervals == null || timeIntervals.contains(jfr.eventTimeToNanos(event.time))) {
                         collector.collect(event);
@@ -336,6 +340,7 @@ public abstract class JfrConverter extends Classifier {
     }
 
     public String getValueType() {
+        if (args.hw != null) return args.hw;
         if (args.nativemem) return "malloc";
         if (args.alloc || args.live) return "allocations";
         if (args.lock) return "locks";
@@ -347,6 +352,7 @@ public abstract class JfrConverter extends Classifier {
     }
 
     public String getTotalUnits() {
+        if (args.hw != null) return "events";
         if (args.nativemem || args.alloc || args.live) return "bytes";
         return "nanoseconds";
     }
@@ -358,7 +364,8 @@ public abstract class JfrConverter extends Classifier {
     // Select sum(samples) or sum(value) depending on the --total option.
     // For lock and nativelock events, convert lock duration from ticks to nanoseconds.
     protected abstract class AggregatedEventVisitor implements EventCollector.Visitor {
-        private final double factor = !args.total ? 0.0 : counterFactor();
+        // Hardware samples are weighted by event count by default; --total is implied
+        private final double factor = !args.total && args.hw == null ? 0.0 : counterFactor();
 
         @Override
         public final void visit(Event event, long samples, long value) {

@@ -198,6 +198,7 @@ class Arguments {
     bool _alluser;
     bool _fdtransfer;
     const char* _fdtransfer_path;
+    const char* _kperf_path;
     int _target_cpu;
     int _style;
     StackWalkFeatures _features;
@@ -262,6 +263,7 @@ class Arguments {
         _alluser(false),
         _fdtransfer(false),
         _fdtransfer_path(NULL),
+        _kperf_path(NULL),
         _target_cpu(-1),
         _style(0),
         _features{},

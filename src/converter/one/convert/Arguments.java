@@ -15,6 +15,7 @@ public class Arguments {
     public String highlight;
     public String output;
     public String state;
+    public String hw;
     public Pattern include;
     public Pattern exclude;
     public double minwidth;

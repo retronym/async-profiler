@@ -14,6 +14,7 @@ DEBUG_PACKAGE_NAME=$(PACKAGE_NAME)-debug
 DEBUG_PACKAGE_DIR=$(PACKAGE_DIR)-debug
 
 ASPROF=bin/asprof
+ASPROF_KPERF=bin/asprof-kperf
 JFRCONV=bin/jfrconv
 LIB_PROFILER=lib/libasyncProfiler.$(SOEXT)
 LIB_PROFILER_DEBUG=libasyncProfiler.$(SOEXT).debug
@@ -141,6 +142,9 @@ endif
 .PHONY: all jar release build-test test clean coverage clean-coverage build-test-java build-test-cpp test-cpp test-java check-md format-md
 
 all: build/bin build/lib build/$(LIB_PROFILER) build/$(ASPROF) jar build/$(JFRCONV) build/$(ASPROF_HEADER)
+ifeq ($(OS_TAG),macos)
+all: build/$(ASPROF_KPERF)
+endif
 
 jar: build/jar build/$(API_JAR) build/$(CONVERTER_JAR)
 
@@ -180,6 +184,10 @@ build/%:
 
 build/$(ASPROF): src/main/* src/jattach/* src/fdtransfer.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEFS) -o $@ src/main/*.cpp src/jattach/*.c
+	$(STRIP) $@
+
+build/$(ASPROF_KPERF): src/kperf/* src/kperfProtocol.h
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ src/kperf/*.c -framework CoreFoundation
 	$(STRIP) $@
 
 build/$(JFRCONV): src/launcher/launcher.sh build/$(CONVERTER_JAR)
