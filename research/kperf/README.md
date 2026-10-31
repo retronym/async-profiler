@@ -72,6 +72,26 @@ Results (agent started at JVM launch, so setup is included):
 - The stacks are plausible, mixing compiled, interpreted, lambda and stub frames. For example: `ThreadPoolExecutor.runWorker` → `Executors$RunnableAdapter.call` → `sbt/internal/TaskProgress$$Lambda…run` → `TaskProgress.$anonfun$schedule$1` → `JFunction0$mcV$sp.apply` → `itable stub`.
 - sbt was idle, so there were only 29 samples in 10s at the default 1M-cycle period.
 
+## Choosing a period
+
+The period (`-e cache-misses@100000`, or `-i` for a single event) is the number of events per sample, not a time rate. A busy JVM produces hundreds of millions of L1D misses a second, so the sample count follows the workload, and a period that suits a small loop can bury a real one. Choose it for a target sample count per profile: **period ≈ events per op × ops / target**. 50–100k samples per profile is plenty for flame graphs and leaf attribution. Each sample costs about 1 KB of collapsed stacks and 0.7 KB of JFR on a compiler workload, and precise-PC events (misses and branch mispredicts on PMCs 5–7, below) also carry a captured PC for the agent to resolve.
+
+A scala3 compiler benchmark, for example, has ~470M L1D load misses per op. At the old `cache-misses` default of 10,000, 13 warmup and 16 measured ops gave ~970k samples per fork, a 650 MB JFR, and gigabytes of collapsed stacks per event. `@100000` brings that to ~97k.
+
+Defaults, measured with javac compiling this repo's Java sources 300 times in one JVM (~28s, about one JMH fork; scratch driver, not checked in):
+
+| event | kpep name | old period → samples | new period → samples |
+|---|---|---|---|
+| `cycles`, `cpu` | `CORE_ACTIVE_CYCLE` | 1M → 133k | 2M → 71k |
+| `instructions` | `INST_ALL` | 1M → 340k | 5M → 66k |
+| `cache-misses` | `L1D_CACHE_MISS_LD_NONSPEC` | 10k → 356k | 100k → 37k |
+| `branch-misses` | `BRANCH_MISPRED_NONSPEC` | 10k → 149k | 20k → 75k |
+| raw miss event, e.g. `PL2_CACHE_MISS_LD` | | 1M → 1.3k | 100k → 13k |
+
+- `cache-misses` is set by the heavier scalac data point rather than javac's: 100k gives 37k for javac and ~97k for scalac, where 50k would give 71k and ~194k.
+- **A kpep name without `@period`** gets its alias's default if it has one (`INST_ALL` → 5M). Otherwise the default goes by kind: 100k if the name contains `MISS` or `MISPRED`, 2M for anything else. Rare events such as TLB misses may still want a smaller period.
+- **Above 500k samples of one event** the agent warns at the end of the session and suggests a period for ~100k, e.g. `kperf: cache-misses: 777256 samples make a large profile; try cache-misses@40000`.
+
 ## Caveats
 
 **Platform and privileges**
