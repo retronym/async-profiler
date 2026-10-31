@@ -104,7 +104,7 @@ static const char USAGE_STRING[] =
     "  --kperf             (macOS) sample hardware counters via the asprof-kperf helper;\n"
     "                      implied by cycles, instructions, cache-misses, branch-misses\n"
     "                      and kpep event names such as L1D_CACHE_MISS_LD_NONSPEC.\n"
-    "                      Up to 4 events: -e cycles+cache-misses@20000\n"
+    "                      Up to 4 events: -e cycles+cache-misses@200000\n"
     "  --target-cpu cpu    sample threads on a specific CPU (perf_events only, default: -1)\n"
     "\n"
     "<pid> is a numeric process ID of the target JVM\n"

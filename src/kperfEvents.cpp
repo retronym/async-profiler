@@ -29,20 +29,36 @@ char KperfEvents::_names[KPERF_MAX_EVENTS][KPERF_EVENT_LEN];
 char KperfEvents::_title[KPERF_MAX_EVENTS * KPERF_EVENT_LEN];
 char KperfEvents::_error[160];
 
+// Above this many samples of one event, suggest a larger period
+const u64 LARGE_SAMPLE_COUNT = 500000;
+
 struct KperfEventAlias {
     const char* alias;
     const char* name;
     long default_interval;
 };
 
-// Linux perf event names mapped to Apple silicon kpep events
+// Linux perf event names mapped to Apple silicon kpep events.
+// Default periods aim at ~50-100k samples in a 30s run of a busy JVM (one JMH fork):
+// a period is events per sample, so the sample count scales with the workload, not with time.
 static const KperfEventAlias kperf_aliases[] = {
-    {"cpu",           "CORE_ACTIVE_CYCLE",         1000000},
-    {"cycles",        "CORE_ACTIVE_CYCLE",         1000000},
-    {"instructions",  "INST_ALL",                  1000000},
-    {"cache-misses",  "L1D_CACHE_MISS_LD_NONSPEC", 10000},
-    {"branch-misses", "BRANCH_MISPRED_NONSPEC",    10000},
+    {"cpu",           "CORE_ACTIVE_CYCLE",         2000000},
+    {"cycles",        "CORE_ACTIVE_CYCLE",         2000000},
+    {"instructions",  "INST_ALL",                  5000000},
+    {"cache-misses",  "L1D_CACHE_MISS_LD_NONSPEC", 100000},
+    {"branch-misses", "BRANCH_MISPRED_NONSPEC",    20000},
 };
+
+// Default period of a kpep event given by name: as for its alias, if it has one;
+// otherwise guess the kind by name, since misses are 10-100x rarer than counts like cycles
+static long defaultPeriod(const char* name) {
+    for (size_t i = 0; i < sizeof(kperf_aliases) / sizeof(kperf_aliases[0]); i++) {
+        if (strcmp(name, kperf_aliases[i].name) == 0) {
+            return kperf_aliases[i].default_interval;
+        }
+    }
+    return strstr(name, "MISS") != NULL || strstr(name, "MISPRED") != NULL ? 100000 : 2000000;
+}
 
 // Maps 64-bit kernel thread ids to the mach port names used as tids by OS::threadId()
 class ThreadIdMap {
@@ -124,14 +140,13 @@ Error KperfEvents::parseEvents(const char* spec, long interval, KperfRequest& re
         }
 
         const char* name = tok;
-        long default_interval = 1000000;
         for (size_t i = 0; i < sizeof(kperf_aliases) / sizeof(kperf_aliases[0]); i++) {
             if (strcmp(tok, kperf_aliases[i].alias) == 0) {
                 name = kperf_aliases[i].name;
-                default_interval = kperf_aliases[i].default_interval;
                 break;
             }
         }
+        long default_interval = defaultPeriod(name);
 
         int i = _num_events++;
         strcpy(_names[i], tok);
@@ -274,6 +289,13 @@ void KperfEvents::readLoop() {
     for (int i = 0; i < _num_events; i++) {
         Log::info("kperf: %s: %llu samples, %llu with precise PC, %llu used as leaf", _names[i],
                   (unsigned long long)samples[i], (unsigned long long)with_pc[i], (unsigned long long)used_pc[i]);
+        if (samples[i] > LARGE_SAMPLE_COUNT) {
+            // Suggest a period giving ~100k samples, rounded to one significant digit
+            u64 period = _periods[i] * (samples[i] / 100000), scale = 1;
+            while (period >= scale * 10) scale *= 10;
+            Log::warn("kperf: %s: %llu samples make a large profile; try %s@%llu", _names[i],
+                      (unsigned long long)samples[i], _names[i], (unsigned long long)((period + scale / 2) / scale * scale));
+        }
     }
 }
 
