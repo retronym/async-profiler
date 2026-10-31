@@ -27,6 +27,7 @@
 #include <limits.h>
 #include <libproc.h>
 #include <poll.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -71,6 +72,9 @@ static int (*kpc_set_counting)(uint32_t);
 static int (*kpc_set_thread_counting)(uint32_t);
 static int (*kpc_set_config)(uint32_t, uint64_t*);
 static int (*kpc_get_config)(uint32_t, uint64_t*);
+static uint32_t (*kpc_get_counting)(void);
+static int (*kpc_get_period)(uint32_t, uint64_t*);
+static int (*kpc_get_cpu_counters)(bool, uint32_t, int*, uint64_t*);
 static int (*kpc_set_period)(uint32_t, uint64_t*);
 static int (*kpc_set_actionid)(uint32_t, uint32_t*);
 static uint32_t (*kpc_get_counter_count)(uint32_t);
@@ -106,6 +110,9 @@ static bool loadFrameworks(void) {
     LOAD(kperf, kperf_action_samplers_set) LOAD(kperf, kperf_action_filter_set_by_pid)
     LOAD(kperf, kperf_sample_set) LOAD(kperf, kperf_reset)
     *(void**)&kpc_get_config = dlsym(kperf, "kpc_get_config");  // optional, diagnostics only
+    *(void**)&kpc_get_counting = dlsym(kperf, "kpc_get_counting");
+    *(void**)&kpc_get_period = dlsym(kperf, "kpc_get_period");
+    *(void**)&kpc_get_cpu_counters = dlsym(kperf, "kpc_get_cpu_counters");
     LOAD(kpep, kpep_db_create) LOAD(kpep, kpep_db_free) LOAD(kpep, kpep_db_event) LOAD(kpep, kpep_config_create)
     LOAD(kpep, kpep_config_free) LOAD(kpep, kpep_config_force_counters) LOAD(kpep, kpep_config_add_event)
     LOAD(kpep, kpep_config_kpc)
@@ -303,6 +310,39 @@ static bool thread_counts = false;
 static uint64_t event_period[KPERF_MAX_EVENTS];
 static uint32_t num_thread_ctrs;
 
+// kpc applies counter settings by cross-calling the CPUs that are online. A cluster
+// that is powered down misses them, and on waking restores its stale PMCR0: it counts
+// but never takes a PMI, so threads running there go unsampled for the whole session.
+// On an M5 Pro about a third of sessions lost one or two of the three clusters.
+// Keep every CPU busy while sampling is set up, so that all clusters are powered.
+#define MAX_SPINNERS 256
+static volatile bool spinning;
+
+static void* spin(void* arg) {
+    while (spinning) {}
+    return NULL;
+}
+
+static int startSampling(pid_t pid, const struct KperfRequest* req, struct KperfResponse* resp);
+
+static int startSamplingAwake(pid_t pid, const struct KperfRequest* req, struct KperfResponse* resp) {
+    int ncpu = 0;
+    size_t len = sizeof(ncpu);
+    sysctlbyname("hw.ncpu", &ncpu, &len, NULL, 0);
+    if (ncpu > MAX_SPINNERS) ncpu = MAX_SPINNERS;
+    pthread_t threads[MAX_SPINNERS];
+    int started = 0;
+    spinning = true;
+    for (; started < ncpu; started++) {
+        if (pthread_create(&threads[started], NULL, spin, NULL) != 0) break;
+    }
+    usleep(20000);  // let every cluster power up
+    int r = startSampling(pid, req, resp);
+    spinning = false;
+    for (int i = 0; i < started; i++) pthread_join(threads[i], NULL);
+    return r;
+}
+
 // Programs one configurable PMC per event to raise a PMI every `period` events,
 // all bound to kperf action 1 which samples the user stack of `pid`. Events go
 // on the PC-capturing PMCs first, unless the request opts out.
@@ -491,6 +531,60 @@ static uint64_t unattributed;
 static uint64_t lost_markers, orphan_samples;
 static uint64_t cpu_last_count[MAX_CPUS][KPC_MAX_COUNTERS];
 
+// -d: once per DIAG_INTERVAL_NS while sampling, log PMU state and PMIs seen, to tell
+// counters that stop counting from counters that stop interrupting
+#define DIAG_INTERVAL_NS 250000000ULL
+static bool diag;
+static uint64_t diag_pmis[KPC_MAX_COUNTERS];  // PMIs of every process, by absolute PMC
+static uint64_t diag_cpus;                     // CPUs that took a PMI
+static uint64_t diag_prev_ours[KPERF_MAX_EVENTS];
+static uint64_t diag_prev_ctr[MAX_CPUS * KPC_MAX_COUNTERS];
+
+static void diagTick(const struct KperfRequest* req, const struct KperfResponse* resp, uint64_t t_ms) {
+    uint32_t nfixed = kpc_get_counter_count(KPC_CLASS_FIXED_MASK);
+    uint32_t nconfig = kpc_get_config_count(KPC_CLASS_CONFIGURABLE_MASK);
+    int forced = -1;
+    kpc_force_all_ctrs_get(&forced);
+    fprintf(stderr, "diag %6llums forced=%d counting=0x%x cpus=0x%llx", (unsigned long long)t_ms, forced,
+            kpc_get_counting ? kpc_get_counting() : 0xffffffffu, (unsigned long long)diag_cpus);
+
+    uint64_t config[KPC_MAX_COUNTERS] = {0}, period[KPC_MAX_COUNTERS] = {0};
+    if (kpc_get_config) kpc_get_config(KPC_CLASS_CONFIGURABLE_MASK, config);
+    if (kpc_get_period) kpc_get_period(KPC_CLASS_CONFIGURABLE_MASK, period);
+
+    // Per-CPU configurable counter values: how many CPUs' counters moved since the last tick
+    int ncpu = 0;
+    size_t len = sizeof(ncpu);
+    sysctlbyname("hw.ncpu", &ncpu, &len, NULL, 0);
+    static uint64_t* ctrs;
+    if (ctrs == NULL) ctrs = calloc(MAX_CPUS * KPC_MAX_COUNTERS, sizeof(uint64_t));
+    int curcpu = 0;
+    bool have_ctrs = kpc_get_cpu_counters != NULL && ncpu > 0 && ncpu <= MAX_CPUS &&
+                     kpc_get_cpu_counters(true, KPC_CLASS_CONFIGURABLE_MASK, &curcpu, ctrs) == 0;
+
+    for (uint32_t i = 0; i < req->num_events; i++) {
+        uint32_t c = resp->counter[i], k = c - nfixed;
+        int moved = 0;
+        uint64_t maxv = 0;
+        if (have_ctrs) {
+            for (int cpu = 0; cpu < ncpu; cpu++) {
+                uint64_t v = ctrs[cpu * nconfig + k];
+                if (v != diag_prev_ctr[cpu * KPC_MAX_COUNTERS + k]) moved++;
+                diag_prev_ctr[cpu * KPC_MAX_COUNTERS + k] = v;
+                if (v > maxv) maxv = v;
+            }
+        }
+        fprintf(stderr, " | PMC%u cfg=0x%llx period=%llu pmis=%llu ours=%llu moved=%d/%d max=0x%llx", c,
+                (unsigned long long)config[k], (unsigned long long)period[k], (unsigned long long)diag_pmis[c],
+                (unsigned long long)(stats[i].pmis - diag_prev_ours[i]), have_ctrs ? moved : -1, ncpu,
+                (unsigned long long)maxv);
+        diag_prev_ours[i] = stats[i].pmis;
+    }
+    fprintf(stderr, "\n");
+    memset(diag_pmis, 0, sizeof(diag_pmis));
+    diag_cpus = 0;
+}
+
 // Per-thread exact counts (first and last PMC_THREAD vector) and PMIs attributed by event
 typedef struct {
     uint64_t tid;
@@ -670,6 +764,11 @@ static bool handleEvent(const kd_buf* e) {
         lost_markers++;
     } else if (id == PERF_KPC_HNDLR && (e->debugid & DBG_FUNC_START)) {
         // PMI on any process: desc, the counter's cumulative count on this CPU, PC (precise if captured)
+        if (diag) {
+            uint32_t c = (uint32_t)KPC_DESC_COUNTER(e->arg1);
+            if (c < KPC_MAX_COUNTERS) diag_pmis[c]++;
+            if (e->cpuid < 64) diag_cpus |= 1ULL << e->cpuid;
+        }
         if (e->cpuid < MAX_CPUS) {
             CpuPmi* prev = &cpu_pmi[e->cpuid];
             if (prev->desc != 0 && knownThread(prev->tid)) {
@@ -793,7 +892,7 @@ static void serveClient(pid_t expected_pid) {
     struct KperfResponse resp;
     memset(&resp, 0, sizeof(resp));
     resp.magic = KPERF_MAGIC;
-    resp.error = startSampling(pid, &req, &resp);
+    resp.error = startSamplingAwake(pid, &req, &resp);
     if (write(client_fd, &resp, sizeof(resp)) != sizeof(resp) || resp.error != 0) {
         if (resp.error) fprintf(stderr, "pid %d: %s\n", pid, resp.message);
         else { kdebugTeardown(); resetCounters(); }
@@ -818,7 +917,18 @@ static void serveClient(pid_t expected_pid) {
     memset(cpu_pmi, 0, sizeof(cpu_pmi));
     num_pending = 0;
     outlen = 0;
+    memset(diag_prev_ours, 0, sizeof(diag_prev_ours));
+    memset(diag_pmis, 0, sizeof(diag_pmis));
+    diag_cpus = 0;
+    uint64_t diag_start = clock_gettime_nsec_np(CLOCK_UPTIME_RAW), diag_next = diag_start + DIAG_INTERVAL_NS;
     while (!terminated && !clientClosed()) {
+        if (diag) {
+            uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+            if (now >= diag_next) {
+                diagTick(&req, &resp, (now - diag_start) / 1000000);
+                diag_next = now + DIAG_INTERVAL_NS;
+            }
+        }
         size_t n = bufcount * sizeof(kd_buf);
         int mib[3] = {CTL_KERN, KERN_KDEBUG, KERN_KDREADTR};
         if (sysctl(mib, 3, buf, &n, NULL, 0) != 0) {
@@ -868,18 +978,19 @@ int main(int argc, char** argv) {
     uid_t uid = getenv("SUDO_UID") ? (uid_t)atoi(getenv("SUDO_UID")) : getuid();
     pid_t target_pid = 0;
     int opt;
-    while ((opt = getopt(argc, argv, "s:u:p:kt")) != -1) {
+    while ((opt = getopt(argc, argv, "s:u:p:ktd")) != -1) {
         switch (opt) {
             case 's': path = optarg; break;
             case 'u': uid = (uid_t)atoi(optarg); break;
             case 'p': target_pid = (pid_t)atoi(optarg); break;
             case 'k': force_kernel = true; break;
             case 't': thread_counts = true; break;
+            case 'd': diag = true; break;
             default: path = NULL; optind = argc; break;
         }
     }
     if (path == NULL) {
-        fprintf(stderr, "Usage: sudo %s -s <socket path> [-u <uid> | -p <pid>] [-k] [-t]\n", argv[0]);
+        fprintf(stderr, "Usage: sudo %s -s <socket path> [-u <uid> | -p <pid>] [-k] [-t] [-d]\n", argv[0]);
         return 1;
     }
     if (!loadFrameworks()) return 1;
