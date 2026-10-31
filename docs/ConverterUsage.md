@@ -115,7 +115,7 @@ With `--spans`, the HTML Flame Graph has a span panel listing the spans of the s
 }
 ```
 
-A grouping is `by` the `innermost` span, the span at a `level` (0 for the outermost), or the `path` from a level on; `skipMarkers` passes over the marker spans. Clicking a group in the panel keeps only its samples, including, for a path, those of the spans nested in it.
+A grouping is `by` the `innermost` span, the span at a `level` (0 for the outermost), or the `path` from a level on; `skipMarkers` passes over the marker spans. Spans listed in `"standalone"` (e.g. a shared table's growth, an amortized cost that lands on whichever span triggers it) are grouped under their own name in every grouping, so they are not counted with the spans enclosing them. Clicking a group in the panel keeps only its samples, including, for a path, those of the spans nested in it.
 
 ## jfrconv examples
 
