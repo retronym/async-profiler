@@ -157,9 +157,10 @@ public class FlameGraph implements Comparator<Frame> {
         }
     }
 
-    public void addSample(CallStack stack, long ticks) {
+    /** Adds a sample; returns the frame it ends in, or null if the stack is excluded */
+    public Frame addSample(CallStack stack, long ticks) {
         if (excludeStack(stack)) {
-            return;
+            return null;
         }
 
         Frame frame = root;
@@ -184,6 +185,17 @@ public class FlameGraph implements Comparator<Frame> {
         int size = stack.size;
         if (size > 0 && stack.types[size - 1] == TYPE_SPAN) size--;  // span leaves are not drawn
         depth = Math.max(depth, size);
+        return frame;
+    }
+
+    // With --spans: the samples' times and leaf frames, for the time lane
+    private Timeline timeline;
+    private Spans timelineSpans;
+    private int printCount;
+
+    void setTimeline(Timeline timeline, Spans spans) {
+        this.timeline = timeline;
+        this.timelineSpans = spans;
     }
 
     public void diff(FlameGraph base) {
@@ -214,6 +226,9 @@ public class FlameGraph implements Comparator<Frame> {
 
     public void dump(PrintStream out) {
         mintotal = (long) (root.total * args.minwidth / 100);
+        if (timeline != null) {
+            timeline.recordParents(root);  // before thin subtrees are folded away
+        }
         if (mintotal > 1) {
             rollUpSpans(root);  // also for a graph read back from html or collapsed output
         }
@@ -258,6 +273,9 @@ public class FlameGraph implements Comparator<Frame> {
         tail = printTill(out, tail, "/*frames:*/");
         printFrame(out, root, 0, 0);
         out.print(outbuf);
+
+        tail = printTill(out, tail, "/*timeline:*/null");
+        out.print(timeline != null ? timeline.toJson(timelineSpans) : "null");
 
         tail = printTill(out, tail, "/*highlight:*/");
         out.print(args.highlight != null ? "'" + escape(args.highlight) + "'" : "");
@@ -337,6 +355,7 @@ public class FlameGraph implements Comparator<Frame> {
             sb.setLength(0);
         }
 
+        frame.printIndex = printCount++;
         lastLevel = level;
         lastX = x;
         lastTotal = frame.total;

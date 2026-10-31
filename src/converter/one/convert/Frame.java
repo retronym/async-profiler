@@ -22,6 +22,8 @@ public class Frame extends HashMap<Integer, Frame> {
     static final int TITLE_MASK = (1 << TYPE_SHIFT) - 1;
 
     final int key;
+    // Index of this frame in the printed output (the viewer's frame order), or -1 if not printed
+    int printIndex = -1;
     long total;
     long self;
     long diff;
