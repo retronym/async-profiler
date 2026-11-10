@@ -246,6 +246,9 @@ public class FlameGraph implements Comparator<Frame> {
         tail = printTill(out, tail, "/*maxdiff:*/-1");
         out.print(maxdiff);
 
+        tail = printTill(out, tail, "/*dispmin:*/0");
+        out.print(args.displayMinwidth);
+
         tail = printTill(out, tail, "/*layers:*/[]");
         out.print(layers());
 

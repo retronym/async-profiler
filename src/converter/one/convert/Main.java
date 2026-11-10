@@ -170,6 +170,8 @@ public class Main {
                 "Flame Graph options:\n" +
                 "     --title STRING     Flame Graph title\n" +
                 "     --minwidth X       Skip frames smaller than X%\n" +
+                "     --display-minwidth X  The viewer hides frames smaller than X% (of the whole graph, after its Collapse\n" +
+                "                        merges frames), so --minwidth can keep finer data than the page shows\n" +
                 "     --grain X          Coarsen Flame Graph to the given grain size\n" +
                 "     --skip N           Skip N bottom frames\n" +
                 "  -r --reverse          Reverse stack traces (defaults to icicle graph)\n" +

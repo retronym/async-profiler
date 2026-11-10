@@ -20,6 +20,7 @@ public class Arguments {
     public Pattern include;
     public Pattern exclude;
     public double minwidth;
+    public double displayMinwidth;
     public double grain;
     public double tail = 0.1;
     public int skip;

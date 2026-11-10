@@ -55,17 +55,21 @@
 	#spanhist {flex: 1; min-width: 0; height: 36px; cursor: pointer}
 	#spanhistlabel {font-size: 10px; opacity: 0.7; white-space: pre; text-align: right}
 	#spanhint {font-size: 10px; opacity: 0.6; margin-top: 4px}
+	#collapsemenu {position: fixed; z-index: 41; display: none; background: var(--legend-bg); color: var(--fg); border: 1px solid var(--legend-border); border-radius: 6px; box-shadow: 0 4px 16px rgba(0,0,0,0.3); padding: 8px 10px; font-size: 12px; width: 420px}
+	#collapsemenu label {display: block; padding: 2px 0; cursor: pointer}
+	#collapsemenu textarea {width: 100%; box-sizing: border-box; height: 64px; margin: 4px 0; font: 11px monospace; background: var(--bg); color: var(--fg); border: 1px solid var(--legend-border)}
+	#collapsemenu .hint {font-size: 10px; opacity: 0.7; margin-top: 2px}
 	#ctxmenu {position: fixed; z-index: 40; display: none; background: var(--legend-bg); color: var(--fg); border: 1px solid var(--legend-border); border-radius: 6px; box-shadow: 0 4px 16px rgba(0,0,0,0.3); padding: 3px; font-size: 12px; min-width: 200px; max-width: 480px}
 	#ctxmenu div {padding: 4px 10px; border-radius: 4px; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap}
 	#ctxmenu div:hover {background: var(--hl-bg); outline: 1px solid var(--hl-border)}
-	#layer-threads, #layer-categories {width: auto; padding: 0 5px; font-size: 11px; color: var(--fg)}
+	#layer-threads, #layer-categories, #collapsebtn {width: auto; padding: 0 5px; font-size: 11px; color: var(--fg)}
 	#spanbtn {width: auto; padding: 0 5px; font-size: 11px; color: var(--fg); display: none}
 	#spanbtn.active {background-color: var(--hl-bg); outline: 1px solid var(--hl-border); border-radius: 4px}
 	#toolbar::after {content: ''; display: table; clear: both}
 	#canvas {width: 100%; height: /*height:*/300px; display: block}
 	#selbox {position: absolute; display: none; background: rgba(100,150,255,0.15); border: 1px solid rgba(100,150,255,0.7); pointer-events: none; box-sizing: border-box}
 	/* Active states for toggle buttons */
-	#search.active, #buview.active, #sortw.active, #shortn.active, #layer-threads.active, #layer-categories.active {background-color: var(--hl-bg); outline: 1px solid var(--hl-border); border-radius: 4px}
+	#search.active, #buview.active, #sortw.active, #shortn.active, #layer-threads.active, #layer-categories.active, #collapsebtn.active {background-color: var(--hl-bg); outline: 1px solid var(--hl-border); border-radius: 4px}
 	/* Bottom-up progress bar */
 	#buprogress {display: none; clear: left; padding: 3px 0 2px}
 	#buptrack {height: 4px; background: var(--hl-border); border-radius: 2px; margin-bottom: 2px; opacity: 0.4}
@@ -134,6 +138,7 @@
 <button id='zoomreset' title='Reset zoom' disabled>1:1</button>
 <button id='layer-threads' style='display:none' title='Thread names: one tower per thread under the root. Off merges the threads, so the graph shows the whole JVM by call path'>Threads</button>
 <button id='layer-categories' style='display:none' title='Categories: [gc], [jit], [c2_comp], [Interpreter], ... above the frames, by what each sample was doing. Off merges them away'>Categories</button>
+<button id='collapsebtn' title='Collapse frames: remove recursive descent and other plumbing (tree transforms, type maps) so the work under it merges into fewer, wider boxes'>Collapse</button>
 <span class='btn-sep'></span>
 <button id='spanbtn' title='Span panel: the spans of the samples under the hovered frame'>Spans</button>
 <button id='restoreBtn' title='Restore removed stacks' disabled><svg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 20 20'><path d='M3.5 10A6.5 6.5 0 0 0 10 16.5 6.5 6.5 0 0 0 16.5 10 6.5 6.5 0 0 0 12 4' stroke='#e17d00' fill='none' stroke-width='2' stroke-linecap='round'/><polyline points='12,1 12,5 8,4' fill='none' stroke='#e17d00' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/></svg></button>
@@ -214,6 +219,7 @@
 <div id='selbox'></div>
 <p id='status'></p>
 <div id='ctxmenu'></div>
+<div id='collapsemenu'><label><input type='checkbox' id='col-auto'> Recursion: a method that reappears below itself (and the frames of a short cycle between)</label><label style='padding-left:18px'><input type='checkbox' id='col-entry' checked> keep the outermost frame of each recursion as its entry</label><label><input type='checkbox' id='col-tree'> Tree transforms and traversals</label><label><input type='checkbox' id='col-types'> Type maps and folds</label><div class='hint'>Also collapse frames whose name matches (regex, one per line):</div><textarea id='col-custom' spellcheck='false'></textarea><div class='hint' id='col-status'></div></div>
 <div id='spanpanel'><div id='spanhead'><button id='spanunpin' title='Unpin: follow the hovered frame again'>&#x1F4CC;</button><span id='spantitle'></span><input id='spanfilter' type='text' placeholder='filter' autocomplete='off' spellcheck='false' title='Show only the spans containing this text'><select id='spangroup' title='Group the samples by'></select><button id='spanhide' title='Hide the panel (the Spans button brings it back)'>&#x2013;</button></div><div id='spanfilts' title='The filters applied'></div><div id='spanhistwrap'><canvas id='spanhist' height='36'></canvas><span id='spanhistlabel'></span></div><div id='spanrows'></div><div id='spanhint'>Click a span to keep only its samples (a filter; a path also keeps the spans nested in it), click it again to undo; Shift+click to highlight it.</div></div>
 <script>
 	// Copyright The async-profiler authors
@@ -229,6 +235,9 @@
 	const maxdiff = /*maxdiff:*/-1;
 	// the synthetic frames at the top of every stack, outermost first, that jfrconv put there (--threads, --classify): level
 	// i + 1 holds layers[i]. The toolbar can merge each away (layer toggles below); none for a graph without them
+	// the viewer hides frames below this share of the graph (%), after the layers and Collapse have merged frames: the
+	// data (--minwidth) can be finer than what is shown, so thin pieces of work that merge into a wide box are not lost
+	const displayMin = /*dispmin:*/0;
 	const layers = /*layers:*/[];
 	const levels = Array(/*depth:*/0);
 	for (let h = 0; h < levels.length; h++) {
@@ -1232,6 +1241,7 @@
 			['Keep only stacks through ' + name, isFrame, () => addFilter({kind: 'search', label: 'only ' + name, pattern: exact, under: null})],
 			['Hide stacks through ' + name, isFrame, () => addFilter({kind: 'hide', label: 'not ' + name, pattern: exact})],
 			['Hide this stack', isFrame && f.level >= root.level, () => hideStack(f)],
+			['Collapse frames like ' + name, isFrame && collapseChanged, () => { collapse.custom += (collapse.custom && !collapse.custom.endsWith('\n') ? '\n' : '') + exact.source; collapseChanged(); }],
 			['Highlight ' + name, isFrame, () => addHighlight(f.title, exact)],
 			['Search for ' + name, isFrame, () => {
 				openSearch();
@@ -1640,11 +1650,13 @@ self.postMessage({progress:1.0,stage:'Done'});self.postMessage({result:newLevels
 	const LAYER_LABELS = {threads: 'layer-threads', categories: 'layer-categories'};
 	const layerOff = new Set();
 
-	// `src` without the levels in `drop` (1-based, the root is 0): their frames' children hang from their parent, and
-	// the frames then alike (same name under the same parent) are one, as in the bottom-up view's tree
-	function dropLevels(src, drop) {
+	// `src` without the frames `dropped(h, i, frame)` is true for (frame i of level h; the root is never dropped): the
+	// children of a dropped frame hang from its nearest kept ancestor, and the frames then alike (same name under the same
+	// parent) are one, all the way down, as in the bottom-up view's tree. A dropped frame's own samples stay on the
+	// kept ancestor. A kept frame's details say how many frames merged into it (`paths`) and were dropped under it.
+	function rebuildLevels(src, dropped) {
 		const rootFrame = src[0][0];
-		const mk = fr => ({title: fr.title, width: 0, color: fr.color, details: fr.details || '', children: new Map(), spans: null});
+		const mk = fr => ({title: fr.title, width: 0, color: fr.color, details: fr.details || '', children: new Map(), spans: null, paths: 0, folded: 0});
 		const rootNode = mk(rootFrame);
 		rootNode.width = rootFrame.width;
 		rootNode.spans = rootFrame.spans ? rootFrame.spans.slice() : null;
@@ -1656,11 +1668,12 @@ self.postMessage({progress:1.0,stage:'Done'});self.postMessage({result:newLevels
 				const fr = level[i];
 				while (p < parents.length - 1 && parents[p].left + parents[p].width <= fr.left) p++;
 				const parent = parentNodes[p];
-				if (drop.has(h)) { nodes[i] = parent; continue; }
+				if (dropped(h, i, fr)) { parent.folded++; nodes[i] = parent; continue; }
 				let node = parent.children.get(fr.title);
 				if (!node) { node = mk(fr); parent.children.set(fr.title, node); }
 				node.width += fr.width;
-				if (fr.spans) { node.spans = node.spans || []; for (const s of fr.spans) node.spans.push(s); }
+				node.paths++;
+				if (fr.spans) { node.spans = node.spans || []; for (const sp of fr.spans) node.spans.push(sp); }
 				nodes[i] = node;
 			}
 			parentNodes = nodes;
@@ -1671,7 +1684,8 @@ self.postMessage({progress:1.0,stage:'Done'});self.postMessage({result:newLevels
 			let at = start;
 			const kids = Array.from(node.children.values()).sort((a, b) => a.title < b.title ? -1 : a.title > b.title ? 1 : 0);
 			for (const k of kids) { layout(k, depth + 1, at); at += k.width; }
-			const fr = {level: depth, left: start, width: node.width, color: node.color, title: node.title, details: node.details};
+			const fr = {level: depth, left: start, width: node.width, color: node.color, title: node.title,
+				details: node.details + (node.paths > 1 ? ', ' + node.paths + ' paths merged' : '') + (node.folded ? ', ' + node.folded + ' frames collapsed' : '')};
 			if (node.spans) fr.spans = node.spans;
 			(out[depth] || (out[depth] = [])).push(fr);
 		})(rootNode, 0, 0);
@@ -1679,10 +1693,121 @@ self.postMessage({progress:1.0,stage:'Done'});self.postMessage({result:newLevels
 		return out;
 	}
 
+	// the frames at least displayMin% wide: a thinner frame's samples stay on its parent, as its own
+	function pruneThin(src) {
+		if (!(displayMin > 0)) return src;
+		const min = src[0][0].width * displayMin / 100;
+		const out = src.map(lv => lv.filter(fr => fr.width >= min));
+		while (out.length > 1 && out[out.length - 1].length === 0) out.pop();
+		return out;
+	}
+
+	function dropLevels(src, drop) { return rebuildLevels(src, h => drop.has(h)); }
+
+	// ── Collapse: recursive descent and other plumbing ──────────────────────────
+	// A tree transformer or a type map reaches its real work through a different chain of transform / transformStats /
+	// atOwner / lambda frames at every depth, so the same work is spread over many thin boxes. Collapsing removes those
+	// frames (the work then hangs from the nearest frame that is kept, and the boxes for it merge): by pattern, and
+	// (Recursion) the frames of a call cycle: a method that reappears below itself, and, in a short cycle, the frames between.
+	const COLLAPSE_PRESETS = {
+		tree: {label: 'Tree transforms and traversals', patterns: [
+			'^scala/(reflect|tools/nsc)/.*\\.(transform(?!Unit)\\w*|traverse\\w*|itraverse\\$?|atOwner|preTransform|mainTransform)$',
+			'^scala/(reflect|tools/nsc)/.*Trees?\\b.*\\.(foreach|foreachPartial)$',
+			'^scala/(reflect|tools/nsc)/.*(Trees|Transformers?|Traverser)\\b.*\\$\\$Lambda.*\\.apply\\w*$',
+			'^scala/(reflect|tools/nsc)/.*\\$anonfun\\$(transform|traverse)\\w*\\$\\d+$',
+		]},
+		types: {label: 'Type maps and folds', patterns: [
+			'^scala/reflect/internal/(tpe/TypeMaps|Types)\\$.*(Map|Folder|Traverser|Collector|Mapper)[\\w$]*\\.(apply|mapOver\\w*|foldOver|traverse\\w*)$',
+			'^scala/reflect/internal/Types\\$\\w+\\.(mapOver\\w*|foldOver)$',
+			'\\$anonfun\\$(mapOver|foldOver)\\$\\d+$',
+		]},
+	};
+	const COLLAPSE_CYCLE = 8;           // the longest cycle whose frames between the repeats are collapsed too
+	const METHOD = /[./]/;               // a frame that names a method: not `interpreted`, which repeats without recursing
+	const collapse = {auto: false, keepEntry: true, presets: new Set(), custom: '', keep: new Set()};
+
+	function collapseRegexes() {
+		const srcs = [];
+		for (const k of collapse.presets) srcs.push(...COLLAPSE_PRESETS[k].patterns);
+		for (const line of collapse.custom.split('\n')) if (line.trim()) srcs.push(line.trim());
+		const out = [];
+		for (const src of srcs) { try { out.push(RegExp(src)); } catch (ignored) {} }
+		return out;
+	}
+
+	function collapseActive() { return collapse.auto || collapse.presets.size > 0 || collapse.custom.trim() !== ''; }
+
+	// per frame (offset of its level + index): is it plumbing
+	function collapseMarks(src, regexes, auto) {
+		const H = src.length, off = new Int32Array(H + 1);
+		for (let h = 0; h < H; h++) off[h + 1] = off[h] + src[h].length;
+		const N = off[H], marks = new Uint8Array(N);
+		const byTitle = new Map();
+		const test = t => {
+			let m = byTitle.get(t);
+			if (m === undefined) { m = regexes.some(r => r.test(t)); byTitle.set(t, m); }
+			return m;
+		};
+		for (let h = 1; h < H; h++) for (let i = 0; i < src[h].length; i++) {
+			const t = src[h][i].title;
+			if (!collapse.keep.has(t) && test(t)) marks[off[h] + i] = 1;
+		}
+		if (auto) {
+			const parent = new Int32Array(N).fill(-1), first = new Int32Array(N).fill(-1), last = new Int32Array(N).fill(-1), next = new Int32Array(N).fill(-1);
+			for (let h = 1; h < H; h++) {
+				const parents = src[h - 1], level = src[h];
+				let p = 0;
+				for (let i = 0; i < level.length; i++) {
+					while (p < parents.length - 1 && parents[p].left + parents[p].width <= level[i].left) p++;
+					const id = off[h] + i, par = off[h - 1] + p;
+					parent[id] = par;
+					if (first[par] < 0) first[par] = id; else next[last[par]] = id;
+					last[par] = id;
+				}
+			}
+			const nearest = new Map();   // title -> the closest frame of it on the current path
+			const saved = new Int32Array(N);
+			const it = new Int32Array(N);
+			const stack = [0];
+			const titles = new Array(N);
+			for (let h = 0; h < H; h++) for (let i = 0; i < src[h].length; i++) titles[off[h] + i] = src[h][i].title;
+			const enter = id => {
+				const t = titles[id], a = nearest.get(t);
+				saved[id] = a === undefined ? -1 : a;
+				if (a !== undefined && METHOD.test(t) && !collapse.keep.has(t)) {
+					// the repeat and the frame it repeats are plumbing; so are the frames between them in a tight cycle
+					// (transform > transformStats > transform), but not in a long one: between a phase's loop and a nested
+					// one, or two calls of the same method far apart, there is work
+					marks[id] = 1;
+					if (!collapse.keepEntry || saved[a] >= 0) marks[a] = 1;   // the outermost frame of a recursion can stay, as its entry
+					let x = id, steps = 0;
+					while (x !== a && x >= 0 && steps <= COLLAPSE_CYCLE) { x = parent[x]; steps++; }
+					if (x === a) for (x = id; x !== a; x = parent[x]) marks[x] = 1;
+				}
+				nearest.set(t, id);
+				it[id] = first[id];
+			};
+			enter(0);
+			while (stack.length) {
+				const id = stack[stack.length - 1], c = it[id];
+				if (c >= 0) { it[id] = next[c]; stack.push(c); enter(c); }
+				else { stack.pop(); const t = titles[id]; if (saved[id] < 0) nearest.delete(t); else nearest.set(t, saved[id]); }
+			}
+		}
+		marks[0] = 0;
+		return {marks, off};
+	}
+
+	function collapseLevels(src) {
+		const {marks, off} = collapseMarks(src, collapseRegexes(), collapse.auto);
+		return rebuildLevels(src, (h, i) => marks[off[h] + i] === 1);
+	}
+
 	function applyLayers() {
 		const drop = new Set();
 		layers.forEach((name, i) => { if (layerOff.has(name)) drop.add(i + 1); });
-		originalLevels = drop.size ? dropLevels(pristineLevels, drop) : pristineLevels.map(h => h.map(fr => ({...fr})));
+		const base = drop.size ? dropLevels(pristineLevels, drop) : pristineLevels;
+		originalLevels = pruneThin(collapseActive() ? collapseLevels(base) : base.map(h => h.map(fr => ({...fr}))));
 		reverseLevelsCache = null;
 		for (const name of layers) document.getElementById(LAYER_LABELS[name]).classList.toggle('active', !layerOff.has(name));
 		if (reverseMode) { computeReverseView(); return; }
@@ -1693,7 +1818,44 @@ self.postMessage({progress:1.0,stage:'Done'});self.postMessage({result:newLevels
 		linkResume();
 	}
 
+	function initCollapse() {
+		const btn = document.getElementById('collapsebtn'), menu = document.getElementById('collapsemenu');
+		const auto = document.getElementById('col-auto'), entry = document.getElementById('col-entry'), custom = document.getElementById('col-custom');
+		const preset = {tree: document.getElementById('col-tree'), types: document.getElementById('col-types')};
+		btn.onclick = function(e) {
+			const open = menu.style.display === 'block';
+			menu.style.display = open ? 'none' : 'block';
+			if (!open) {
+				const r = btn.getBoundingClientRect();
+				menu.style.left = Math.max(0, Math.min(r.left, innerWidth - menu.offsetWidth - 4)) + 'px';
+				menu.style.top = (r.bottom + 4) + 'px';
+			}
+		};
+		addEventListener('mousedown', e => { if (!menu.contains(e.target) && e.target !== btn) menu.style.display = 'none'; }, true);
+		let timer = null;
+		const changed = function() {
+			collapse.auto = auto.checked;
+			collapse.keepEntry = entry.checked;
+			collapse.presets.clear();
+			for (const k in preset) if (preset[k].checked) collapse.presets.add(k);
+			collapse.custom = custom.value;
+			btn.classList.toggle('active', collapseActive());
+			clearTimeout(timer);
+			timer = setTimeout(function() {
+				const t0 = performance.now();
+				applyLayers();
+				const n = levels.reduce((a, l) => a + l.length, 0), n0 = pristineLevels.reduce((a, l) => a + l.length, 0);
+				document.getElementById('col-status').textContent = collapseActive() ? n0 + ' frames -> ' + n + ' (' + Math.round(performance.now() - t0) + ' ms)' : '';
+			}, 150);
+		};
+		auto.onchange = entry.onchange = custom.oninput = changed;
+		for (const k in preset) preset[k].onchange = changed;
+		collapseChanged = function() { custom.value = collapse.custom; changed(); };
+	}
+	let collapseChanged = null;
+
 	function initLayers() {
+		initCollapse();
 		for (const name of layers) {
 			const b = document.getElementById(LAYER_LABELS[name]);
 			if (!b) continue;
@@ -1704,7 +1866,7 @@ self.postMessage({progress:1.0,stage:'Done'});self.postMessage({result:newLevels
 			};
 		}
 		if (layers.includes('threads') && layers.includes('categories')) layerOff.add('categories');
-		if (layerOff.size) applyLayers();
+		if (layerOff.size || displayMin > 0) applyLayers();
 		else for (const name of layers) document.getElementById(LAYER_LABELS[name]).classList.add('active');
 	}
 
