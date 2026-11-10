@@ -246,6 +246,9 @@ public class FlameGraph implements Comparator<Frame> {
         tail = printTill(out, tail, "/*maxdiff:*/-1");
         out.print(maxdiff);
 
+        tail = printTill(out, tail, "/*layers:*/[]");
+        out.print(layers());
+
         tail = printTill(out, tail, "/*depth:*/0");
         out.print(depth);
 
@@ -263,6 +266,13 @@ public class FlameGraph implements Comparator<Frame> {
         out.print(args.highlight != null ? "'" + escape(args.highlight) + "'" : "");
 
         out.print(tail);
+    }
+
+    // The synthetic frames at the top of every stack, outermost first (--threads, then --classify), for the viewer's
+    // layer toggles
+    private String layers() {
+        return "[" + (args.threads ? "'threads'" : "") + (args.threads && args.classify ? "," : "")
+                + (args.classify ? "'categories'" : "") + "]";
     }
 
     // The span panel's groupings (--span-config): JSON, given inline or as a file, embedded in the page script as is

@@ -64,7 +64,7 @@
 	#canvas {width: 100%; height: /*height:*/300px; display: block}
 	#selbox {position: absolute; display: none; background: rgba(100,150,255,0.15); border: 1px solid rgba(100,150,255,0.7); pointer-events: none; box-sizing: border-box}
 	/* Active states for toggle buttons */
-	#search.active, #buview.active, #sortw.active, #shortn.active {background-color: var(--hl-bg); outline: 1px solid var(--hl-border); border-radius: 4px}
+	#search.active, #buview.active, #sortw.active, #shortn.active, #layer-threads.active, #layer-categories.active {background-color: var(--hl-bg); outline: 1px solid var(--hl-border); border-radius: 4px}
 	/* Bottom-up progress bar */
 	#buprogress {display: none; clear: left; padding: 3px 0 2px}
 	#buptrack {height: 4px; background: var(--hl-border); border-radius: 2px; margin-bottom: 2px; opacity: 0.4}
@@ -131,6 +131,8 @@
 <button id='zoomout' title='Zoom out (-)'><svg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 20 20'><circle cx='8' cy='8' r='5.5' stroke='#004d80' fill='none' stroke-width='1.5'/><line x1='12.4' y1='12.4' x2='17' y2='17' stroke='#004d80' stroke-width='2' stroke-linecap='round'/><line x1='5' y1='8' x2='11' y2='8' stroke='#004d80' stroke-width='1.5' stroke-linecap='round'/></svg></button>
 <span id='zoomlevel' title='Current zoom level'>100%</span>
 <button id='zoomreset' title='Reset zoom' disabled>1:1</button>
+<button id='layer-threads' style='display:none' title='Thread names: one tower per thread under the root. Off merges the threads, so the graph shows the whole JVM by call path'>Threads</button>
+<button id='layer-categories' style='display:none' title='Categories: [gc], [jit], [c2_comp], [Interpreter], ... above the frames, by what each sample was doing. Off merges them away'>Categories</button>
 <span class='btn-sep'></span>
 <button id='spanbtn' title='Span panel: the spans of the samples under the hovered frame'>Spans</button>
 <button id='restoreBtn' title='Restore removed stacks' disabled><svg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 20 20'><path d='M3.5 10A6.5 6.5 0 0 0 10 16.5 6.5 6.5 0 0 0 16.5 10 6.5 6.5 0 0 0 12 4' stroke='#e17d00' fill='none' stroke-width='2' stroke-linecap='round'/><polyline points='12,1 12,5 8,4' fill='none' stroke='#e17d00' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/></svg></button>
@@ -224,6 +226,9 @@
 	const units = '/*units:*/';
 	const U = undefined;
 	const maxdiff = /*maxdiff:*/-1;
+	// the synthetic frames at the top of every stack, outermost first, that jfrconv put there (--threads, --classify): level
+	// i + 1 holds layers[i]. The toolbar can merge each away (layer toggles below); none for a graph without them
+	const layers = /*layers:*/[];
 	const levels = Array(/*depth:*/0);
 	for (let h = 0; h < levels.length; h++) {
 		levels[h] = [];
@@ -1625,6 +1630,83 @@ self.postMessage({progress:1.0,stage:'Done'});self.postMessage({result:newLevels
 		else computeReverseView();
 	};
 
+	// ── Layers: thread names and categories ────────────────────────────────────
+	// jfrconv --threads and --classify put a frame per thread, and one per category, at the top of every stack. Their
+	// buttons merge a layer away (the frames beneath it, now under the same parent, that have the same name merge) or
+	// bring it back, so one graph answers "which thread" and "which method, whatever the thread". A graph that has
+	// both starts without the categories: the threads, as a graph with only --threads would show. Display only; the
+	// pristine frames are kept, and a layer's return rebuilds from them.
+	const LAYER_LABELS = {threads: 'layer-threads', categories: 'layer-categories'};
+	const layerOff = new Set();
+
+	// `src` without the levels in `drop` (1-based, the root is 0): their frames' children hang from their parent, and
+	// the frames then alike (same name under the same parent) are one, as in the bottom-up view's tree
+	function dropLevels(src, drop) {
+		const rootFrame = src[0][0];
+		const mk = fr => ({title: fr.title, width: 0, color: fr.color, details: fr.details || '', children: new Map(), spans: null});
+		const rootNode = mk(rootFrame);
+		rootNode.width = rootFrame.width;
+		rootNode.spans = rootFrame.spans ? rootFrame.spans.slice() : null;
+		let parentNodes = [rootNode];
+		for (let h = 1; h < src.length; h++) {
+			const parents = src[h - 1], level = src[h], nodes = new Array(level.length);
+			let p = 0;
+			for (let i = 0; i < level.length; i++) {
+				const fr = level[i];
+				while (p < parents.length - 1 && parents[p].left + parents[p].width <= fr.left) p++;
+				const parent = parentNodes[p];
+				if (drop.has(h)) { nodes[i] = parent; continue; }
+				let node = parent.children.get(fr.title);
+				if (!node) { node = mk(fr); parent.children.set(fr.title, node); }
+				node.width += fr.width;
+				if (fr.spans) { node.spans = node.spans || []; for (const s of fr.spans) node.spans.push(s); }
+				nodes[i] = node;
+			}
+			parentNodes = nodes;
+		}
+		const out = [];
+		// children left to right from the parent's left edge, by name as the converter orders them
+		(function layout(node, depth, start) {
+			let at = start;
+			const kids = Array.from(node.children.values()).sort((a, b) => a.title < b.title ? -1 : a.title > b.title ? 1 : 0);
+			for (const k of kids) { layout(k, depth + 1, at); at += k.width; }
+			const fr = {level: depth, left: start, width: node.width, color: node.color, title: node.title, details: node.details};
+			if (node.spans) fr.spans = node.spans;
+			(out[depth] || (out[depth] = [])).push(fr);
+		})(rootNode, 0, 0);
+		for (const lv of out) lv.sort((a, b) => a.left - b.left);
+		return out;
+	}
+
+	function applyLayers() {
+		const drop = new Set();
+		layers.forEach((name, i) => { if (layerOff.has(name)) drop.add(i + 1); });
+		originalLevels = drop.size ? dropLevels(pristineLevels, drop) : pristineLevels.map(h => h.map(fr => ({...fr})));
+		reverseLevelsCache = null;
+		for (const name of layers) document.getElementById(LAYER_LABELS[name]).classList.toggle('active', !layerOff.has(name));
+		if (reverseMode) { computeReverseView(); return; }
+		_swapLevels(originalLevels);
+		_reapplySort();
+		_resetView();
+		render(levels[0][0]);
+		linkResume();
+	}
+
+	function initLayers() {
+		for (const name of layers) {
+			const b = document.getElementById(LAYER_LABELS[name]);
+			if (!b) continue;
+			b.style.display = '';
+			b.onclick = function() {
+				if (layerOff.has(name)) layerOff.delete(name); else layerOff.add(name);
+				applyLayers();
+			};
+		}
+		if (layers.includes('threads') && layers.includes('categories')) layerOff.add('categories');
+		if (layerOff.size) applyLayers();
+		else for (const name of layers) document.getElementById(LAYER_LABELS[name]).classList.add('active');
+	}
+
 	// ── Short names ───────────────────────────────────────────────────────────
 	// Frame labels without the package: `dotty/tools/dotc/core/Types$TypeMap.mapOver` (or dotted) shows as
 	// `Types$TypeMap.mapOver`. Display only: search, filters and the tooltip use the full name. Remembered.
@@ -1800,8 +1882,10 @@ unpack(cpool);
 render(levels[0][0]);
 { const h = /*highlight:*/null; if (h) { search(h); document.getElementById('searchinput').value = h; openSearch(); } }
 
-// Snapshot original frame data so removed stacks can be restored
-const originalLevels = levels.map(h => h.map(fr => ({...fr})));
+// Snapshot original frame data so removed stacks can be restored; `originalLevels` is what the layer toggles left of it
+const pristineLevels = levels.map(h => h.map(fr => ({...fr})));
+let originalLevels = pristineLevels.map(h => h.map(fr => ({...fr})));
+initLayers();
 { let w = ''; try { w = localStorage.getItem('flame-sort-weight'); } catch (ignored) {} if (w) setSortByWeight(true); }
 // the state as loaded is not a change to post
 if (linked) linkSent = JSON.stringify(flameState());
