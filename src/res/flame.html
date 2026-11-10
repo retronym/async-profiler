@@ -6,7 +6,7 @@
 	:root      {--bg: #ffffff; --fg: #000000; --hl-bg: #ffffe0; --hl-border: #ffc000; --link: #0366d6; --legend-bg: #ffffe0; --legend-border: #666666}
 	:root.dark {--bg: #1e1e1e; --fg: #cccccc; --hl-bg: #3a3a00; --hl-border: #8a7000; --link: #58a6ff; --legend-bg: #333333; --legend-border: #888888}
 	body {margin: 0; padding: 10px 10px 22px 10px; background-color: var(--bg); color: var(--fg)}
-	h1 {margin: 5px 0 0 0; font-size: 18px; font-weight: normal; text-align: center}
+	h1 {margin: 5px 0 0 0; font-size: 18px; font-weight: normal; text-align: center; overflow: hidden; white-space: nowrap; text-overflow: ellipsis}
 	header {margin: -22px 0 6px 0}
 	header.left {display: flex; align-items: center}
 	button {border: none; background: none; width: 24px; height: 24px; cursor: pointer; margin: 0; padding: 2px 0 0 0; text-align: center}
@@ -219,7 +219,7 @@
 <div id='selbox'></div>
 <p id='status'></p>
 <div id='ctxmenu'></div>
-<div id='collapsemenu'><label><input type='checkbox' id='col-auto'> Recursion: a method that reappears below itself (and the frames of a short cycle between)</label><label style='padding-left:18px'><input type='checkbox' id='col-entry' checked> keep the outermost frame of each recursion as its entry</label><label><input type='checkbox' id='col-tree'> Tree transforms and traversals</label><label><input type='checkbox' id='col-types'> Type maps and folds</label><div class='hint'>Also collapse frames whose name matches (regex, one per line):</div><textarea id='col-custom' spellcheck='false'></textarea><div class='hint' id='col-status'></div></div>
+<div id='collapsemenu'><label><input type='checkbox' id='col-auto'> Recursion: a method that reappears below itself (and the frames of a short cycle between)</label><label style='padding-left:18px'><input type='checkbox' id='col-entry' checked> keep the outermost frame of each recursion as its entry</label><label style='padding-left:18px'>cycles of up to <input type='number' id='col-cycle' min='1' max='64' value='8' style='width:44px'> frames collapse whole</label><label><input type='checkbox' id='col-tree'> Tree transforms and traversals</label><label><input type='checkbox' id='col-types'> Type maps and folds</label><div class='hint'>Also collapse frames whose name matches (regex, one per line):</div><textarea id='col-custom' spellcheck='false'></textarea><div class='hint' id='col-status'></div></div>
 <div id='spanpanel'><div id='spanhead'><button id='spanunpin' title='Unpin: follow the hovered frame again'>&#x1F4CC;</button><span id='spantitle'></span><input id='spanfilter' type='text' placeholder='filter' autocomplete='off' spellcheck='false' title='Show only the spans containing this text'><select id='spangroup' title='Group the samples by'></select><button id='spanhide' title='Hide the panel (the Spans button brings it back)'>&#x2013;</button></div><div id='spanfilts' title='The filters applied'></div><div id='spanhistwrap'><canvas id='spanhist' height='36'></canvas><span id='spanhistlabel'></span></div><div id='spanrows'></div><div id='spanhint'>Click a span to keep only its samples (a filter; a path also keeps the spans nested in it), click it again to undo; Shift+click to highlight it.</div></div>
 <script>
 	// Copyright The async-profiler authors
@@ -984,7 +984,7 @@
 	// The filter chips, in the search bar and, nearer to where span filters are made, in the span panel
 	function updateFilterChips() {
 		fillFilterChips(document.getElementById('filtchips'));
-		document.getElementById('filtrow').classList.toggle('visible', filters.length > 0);
+		document.getElementById('filtrow').classList.toggle('visible', filters.length > 0 || collapseActive());
 		const panel = document.getElementById('spanfilts');
 		fillFilterChips(panel);
 		if (filters.length > 1) {
@@ -995,11 +995,24 @@
 			clear.onclick = restoreStacks;
 			panel.appendChild(clear);
 		}
-		panel.classList.toggle('visible', filters.length > 0);
+		panel.classList.toggle('visible', filters.length > 0 || collapseActive());
 	}
 
 	function fillFilterChips(el) {
 		el.innerHTML = '';
+		if (collapseActive()) {
+			const chip = document.createElement('span');
+			chip.className = 'filt-chip';
+			chip.textContent = 'collapse: ' + collapseSummary();
+			chip.title = 'Collapsed frames (the Collapse button): the frames they hold are merged away';
+			const x = document.createElement('button');
+			x.className = 'chip-x';
+			x.textContent = '\u00d7';
+			x.title = 'Stop collapsing';
+			x.onclick = function(e) { e.stopPropagation(); setCollapse({}); };
+			chip.appendChild(x);
+			el.appendChild(chip);
+		}
 		filters.forEach(function(flt, i) {
 			if (i > 0) {
 				const sep = document.createElement('span');
@@ -1722,9 +1735,9 @@ self.postMessage({progress:1.0,stage:'Done'});self.postMessage({result:newLevels
 			'\\$anonfun\\$(mapOver|foldOver)\\$\\d+$',
 		]},
 	};
-	const COLLAPSE_CYCLE = 8;           // the longest cycle whose frames between the repeats are collapsed too
 	const METHOD = /[./]/;               // a frame that names a method: not `interpreted`, which repeats without recursing
-	const collapse = {auto: false, keepEntry: true, presets: new Set(), custom: '', keep: new Set()};
+	const collapse = {auto: false, keepEntry: true, cycle: 8,   // cycle: the longest cycle whose frames between the repeats are collapsed too
+		 presets: new Set(), custom: '', keep: new Set()};
 
 	function collapseRegexes() {
 		const srcs = [];
@@ -1781,7 +1794,7 @@ self.postMessage({progress:1.0,stage:'Done'});self.postMessage({result:newLevels
 					marks[id] = 1;
 					if (!collapse.keepEntry || saved[a] >= 0) marks[a] = 1;   // the outermost frame of a recursion can stay, as its entry
 					let x = id, steps = 0;
-					while (x !== a && x >= 0 && steps <= COLLAPSE_CYCLE) { x = parent[x]; steps++; }
+					while (x !== a && x >= 0 && steps <= collapse.cycle) { x = parent[x]; steps++; }
 					if (x === a) for (x = id; x !== a; x = parent[x]) marks[x] = 1;
 				}
 				nearest.set(t, id);
@@ -1811,16 +1824,28 @@ self.postMessage({progress:1.0,stage:'Done'});self.postMessage({result:newLevels
 		reverseLevelsCache = null;
 		for (const name of layers) document.getElementById(LAYER_LABELS[name]).classList.toggle('active', !layerOff.has(name));
 		if (reverseMode) { computeReverseView(); return; }
+		const keep = filters;   // the filters stay across a layer or collapse change
 		_swapLevels(originalLevels);
 		_reapplySort();
 		_resetView();
-		render(levels[0][0]);
+		filters = keep;
+		if (filters.length) reapplyFilters(); else render(levels[0][0]);
+		updateFilterChips();
 		linkResume();
 	}
 
+	// the title takes the room between the button row and the credit, and shortens to fit
+	function fitTitle() {
+		const h1 = document.querySelector('#toolbar h1'), l = document.querySelector('#toolbar header.left'), r = document.querySelector('#toolbar header:not(.left)');
+		if (!h1 || !l) return;
+		h1.style.marginLeft = (l.offsetWidth + 8) + 'px';
+		h1.style.marginRight = (r ? r.offsetWidth + 8 : 0) + 'px';
+	}
+	addEventListener('resize', fitTitle);
+
 	function initCollapse() {
 		const btn = document.getElementById('collapsebtn'), menu = document.getElementById('collapsemenu');
-		const auto = document.getElementById('col-auto'), entry = document.getElementById('col-entry'), custom = document.getElementById('col-custom');
+		const cycle = document.getElementById('col-cycle'), auto = document.getElementById('col-auto'), entry = document.getElementById('col-entry'), custom = document.getElementById('col-custom');
 		const preset = {tree: document.getElementById('col-tree'), types: document.getElementById('col-types')};
 		btn.onclick = function(e) {
 			const open = menu.style.display === 'block';
@@ -1832,10 +1857,13 @@ self.postMessage({progress:1.0,stage:'Done'});self.postMessage({result:newLevels
 			}
 		};
 		addEventListener('mousedown', e => { if (!menu.contains(e.target) && e.target !== btn) menu.style.display = 'none'; }, true);
+		addEventListener('keydown', e => { if (e.key === 'Escape') menu.style.display = 'none'; });
+		menu.onkeydown = e => e.stopPropagation();  // not the page's shortcuts
 		let timer = null;
 		const changed = function() {
 			collapse.auto = auto.checked;
 			collapse.keepEntry = entry.checked;
+			collapse.cycle = Math.max(1, Math.min(64, +cycle.value || 8));
 			collapse.presets.clear();
 			for (const k in preset) if (preset[k].checked) collapse.presets.add(k);
 			collapse.custom = custom.value;
@@ -1843,18 +1871,36 @@ self.postMessage({progress:1.0,stage:'Done'});self.postMessage({result:newLevels
 			clearTimeout(timer);
 			timer = setTimeout(function() {
 				const t0 = performance.now();
+				try { localStorage.setItem('flame-collapse', JSON.stringify(collapseState())); } catch (ignored) {}
 				applyLayers();
 				const n = levels.reduce((a, l) => a + l.length, 0), n0 = pristineLevels.reduce((a, l) => a + l.length, 0);
 				document.getElementById('col-status').textContent = collapseActive() ? n0 + ' frames -> ' + n + ' (' + Math.round(performance.now() - t0) + ' ms)' : '';
 			}, 150);
 		};
-		auto.onchange = entry.onchange = custom.oninput = changed;
+		auto.onchange = entry.onchange = cycle.onchange = custom.oninput = changed;
 		for (const k in preset) preset[k].onchange = changed;
 		collapseChanged = function() { custom.value = collapse.custom; changed(); };
+		// the menu from `st` (a collapseState())
+		setCollapse = function(st) {
+			auto.checked = !!st.auto; entry.checked = st.keepEntry !== false; cycle.value = st.cycle || 8; custom.value = st.custom || '';
+			for (const k in preset) preset[k].checked = (st.presets || []).includes(k);
+			changed();
+		};
+		try { const st = JSON.parse(localStorage.getItem('flame-collapse') || 'null'); if (st) setCollapse(st); } catch (ignored) {}
 	}
-	let collapseChanged = null;
+	let collapseChanged = null, setCollapse = null;
+	function collapseState() { return {auto: collapse.auto, keepEntry: collapse.keepEntry, cycle: collapse.cycle, presets: [...collapse.presets].sort(), custom: collapse.custom}; }
+	function collapseSummary() {
+		const parts = [];
+		if (collapse.auto) parts.push('recursion');
+		for (const k of [...collapse.presets].sort()) parts.push(COLLAPSE_PRESETS[k].label.toLowerCase());
+		const n = collapse.custom.split('\n').filter(l => l.trim()).length;
+		if (n) parts.push(n + (n > 1 ? ' patterns' : ' pattern'));
+		return parts.join(', ');
+	}
 
 	function initLayers() {
+		fitTitle();
 		initCollapse();
 		for (const name of layers) {
 			const b = document.getElementById(LAYER_LABELS[name]);
@@ -1960,7 +2006,7 @@ self.postMessage({progress:1.0,stage:'Done'});self.postMessage({result:newLevels
 	function flameState() {
 		return {
 			dark: document.documentElement.classList.contains('dark'), shortNames, inverted, reverse: reverseMode,
-			sortw: sortedByWeight,
+			sortw: sortedByWeight, layersOff: [...layerOff].sort(), collapse: collapseState(),
 			search: {open: document.getElementById('searchbar').classList.contains('open'),
 				term: document.getElementById('searchinput').value, regex: useRegex, caseSensitive},
 			highlights: highlightChips.map(c => ({term: c.term, label: c.label, pattern: patternState(c.pattern), color: c.color, span: c.span})),
@@ -1993,6 +2039,14 @@ self.postMessage({progress:1.0,stage:'Done'});self.postMessage({result:newLevels
 				document.getElementById('shortn').classList.toggle('active', shortNames);
 			}
 			inverted = s.inverted;
+			// the layers and collapse rebuild the levels; apply the rest once they are in place
+			const lo = JSON.stringify(s.layersOff || []), co = JSON.stringify(s.collapse || collapseState());
+			if (s.layersOff && (lo !== JSON.stringify([...layerOff].sort()) || co !== JSON.stringify(collapseState()))) {
+				layerOff.clear(); for (const n of s.layersOff) layerOff.add(n);
+				linkPending = s;
+				if (co !== JSON.stringify(collapseState())) setCollapse(s.collapse); else applyLayers();
+				return;
+			}
 			if (s.reverse !== reverseMode) {
 				// the bottom-up view resets the rest; apply it once that view is in place (perhaps after its worker)
 				linkPending = s;
